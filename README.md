@@ -40,6 +40,9 @@ git-weekly-automation/
 ```bash
 cd <path-to-project>
 ./scripts/setup
+
+# 卸载
+./scripts/setup uninstall
 ```
 
 执行后，本机上所有 Git 仓库的每次提交都会自动记录到 `data/commits/YYYY-WXX.jsonl`。
@@ -176,9 +179,10 @@ cp config.example.json config.json
 ## 卸载
 
 ```bash
-git config --global --unset core.hooksPath
-./scripts/schedule list | tail -n +3 | awk '{print $1}' | xargs -I{} ./scripts/schedule remove --name {}
+./scripts/setup uninstall
 ```
+
+一键移除：全局 git hook + 所有定时任务 +（确认后）日志数据和报告。
 
 ## 依赖
 

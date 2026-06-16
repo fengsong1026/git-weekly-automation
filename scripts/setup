@@ -2,14 +2,9 @@
 # ============================================================================
 # git-weekly-automation setup script
 #
-# Performs one-time setup:
-#   1. Configures git to use this project's hooks globally
-#   2. Creates required directories
-#   3. Makes hook scripts executable
-#   4. Verifies prerequisites
-#
 # Usage:
-#   ./scripts/setup
+#   ./scripts/setup            Install global git hook
+#   ./scripts/setup uninstall  Remove global git hook
 # ============================================================================
 
 set -euo pipefail
@@ -17,6 +12,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 HOOKS_DIR="$PROJECT_DIR/hooks"
+HOOKS_PATH_ABS="$(cd "$HOOKS_DIR" && pwd)"
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -24,8 +20,84 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
+ACTION="${1:-install}"
+
+# ======================================================================
+# Uninstall
+# ======================================================================
+if [ "$ACTION" = "uninstall" ]; then
+    echo "============================================"
+    echo "  git-weekly-automation — Uninstall All"
+    echo "============================================"
+    echo ""
+
+    # --- 1. Remove git hook ---
+    CURRENT_HOOKS_PATH="$(git config --global core.hooksPath 2>/dev/null || echo "")"
+    echo "[1/3] Git global hook..."
+    if [ "$CURRENT_HOOKS_PATH" = "$HOOKS_PATH_ABS" ]; then
+        git config --global --unset core.hooksPath
+        echo -e "      ${GREEN}Removed.${NC} Git restored to default."
+    elif [ -z "$CURRENT_HOOKS_PATH" ]; then
+        echo "       No hook configured. Skipped."
+    else
+        echo -e "      ${YELLOW}HooksPath is $CURRENT_HOOKS_PATH — not ours. Skipped.${NC}"
+    fi
+
+    # --- 2. Clear scheduled tasks ---
+    echo "[2/3] Scheduled tasks..."
+    PLIST_COUNT=$(ls "$HOME/Library/LaunchAgents/com.git-weekly-automation."*.plist 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$PLIST_COUNT" -gt 0 ] 2>/dev/null; then
+        for plist in "$HOME/Library/LaunchAgents/com.git-weekly-automation."*.plist; do
+            [ -f "$plist" ] || continue
+            label="com.git-weekly-automation.$(basename "$plist" .plist | sed 's/com.git-weekly-automation.//')"
+            launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || launchctl bootout "$label" 2>/dev/null || true
+            rm -f "$plist"
+        done
+        echo -e "      ${GREEN}Removed $PLIST_COUNT task(s).${NC}"
+    else
+        echo "       No tasks found. Skipped."
+    fi
+
+    # --- 3. Remove data ---
+    echo "[3/3] Data files..."
+    if [ -d "$PROJECT_DIR/data" ] && [ "$(ls -A "$PROJECT_DIR/data" 2>/dev/null)" ]; then
+        read -p "      Remove commit logs and state files? [y/N]: " -r CONFIRM
+        if [ "$CONFIRM" = "y" ] || [ "$CONFIRM" = "Y" ]; then
+            rm -rf "$PROJECT_DIR/data"
+            echo -e "      ${GREEN}Removed.${NC}"
+        else
+            echo "       Skipped."
+        fi
+    else
+        echo "       No data files. Skipped."
+    fi
+    # Also remove reports if exists
+    if [ -d "$PROJECT_DIR/reports" ] && [ "$(ls -A "$PROJECT_DIR/reports" 2>/dev/null)" ]; then
+        read -p "      Remove generated reports? [y/N]: " -r CONFIRM
+        if [ "$CONFIRM" = "y" ] || [ "$CONFIRM" = "Y" ]; then
+            rm -rf "$PROJECT_DIR/reports"
+            echo -e "      ${GREEN}Removed.${NC}"
+        else
+            echo "       Skipped."
+        fi
+    fi
+
+    echo ""
+    echo -e "${GREEN}Uninstall complete.${NC}"
+    echo "You can now delete the project directory: rm -rf $PROJECT_DIR"
+    exit 0
+fi
+
+# ======================================================================
+# Install (default)
+# ======================================================================
+if [ "$ACTION" != "install" ]; then
+    echo "Usage: $0 [install|uninstall]"
+    exit 1
+fi
+
 echo "============================================"
-echo "  git-weekly-automation — One-Time Setup"
+echo "  git-weekly-automation — Install Hook"
 echo "============================================"
 echo ""
 
@@ -68,7 +140,6 @@ echo -e "${GREEN}OK${NC}"
 
 # --- Step 4: Set global hooks path ---
 echo -n "[4/5] Configuring git global hooks path... "
-HOOKS_PATH_ABS="$(cd "$HOOKS_DIR" && pwd)"
 git config --global core.hooksPath "$HOOKS_PATH_ABS"
 echo -e "${GREEN}OK${NC}"
 echo "        Hooks path: $HOOKS_PATH_ABS"
@@ -98,10 +169,10 @@ echo ""
 echo "  • To generate a weekly report from your commits:"
 echo "    python3 $SCRIPT_DIR/generate-weekly-report"
 echo ""
-echo "  • To schedule automatic weekly reports (every Friday at 5pm):"
+echo "  • To schedule automatic weekly reports:"
 echo "    $SCRIPT_DIR/schedule add --name weekly-report --schedule 'Fri 17:00' \\"
 echo "      --command 'python3 $SCRIPT_DIR/generate-weekly-report'"
 echo ""
-echo "  • To undo this setup (restore git defaults):"
-echo "    git config --global --unset core.hooksPath"
+echo "  • To remove the global hook:"
+echo "    $SCRIPT_DIR/setup uninstall"
 echo ""

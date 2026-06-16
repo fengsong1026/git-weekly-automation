@@ -438,6 +438,11 @@ Examples:
         help="Print the prompt without calling the API",
     )
     parser.add_argument(
+        "--force", "-f",
+        action="store_true",
+        help="Regenerate report even if it already exists",
+    )
+    parser.add_argument(
         "--max-tokens",
         type=int,
         default=4096,
@@ -544,7 +549,20 @@ Examples:
         print("=" * 60)
         return
 
-    # --- Step 6: Call API ---
+    # --- Step 6: Determine output path and check for existing report ---
+    if args.output:
+        output_path = args.output
+    else:
+        output_path = REPORTS_DIR / f"weekly-{week_label.replace(' ', '-').replace('(', '').replace(')', '')}.md"
+
+    if not args.force and output_path.exists():
+        mtime = datetime.fromtimestamp(output_path.stat().st_mtime)
+        print(f"[*] Report already exists: {output_path}")
+        print(f"    Generated: {mtime.strftime('%Y-%m-%d %H:%M')}")
+        print(f"    Use --force to regenerate.")
+        return
+
+    # --- Step 7: Call API ---
     print(f"[*] Calling API (model: {args.model}, base: {api_base}) ...")
     try:
         report = call_openai_compatible_api(
@@ -560,12 +578,7 @@ Examples:
         print(f"\n[!] API call failed: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # --- Step 7: Save report ---
-    if args.output:
-        output_path = args.output
-    else:
-        output_path = REPORTS_DIR / f"weekly-{week_label.replace(' ', '-').replace('(', '').replace(')', '')}.md"
-
+    # --- Step 8: Save report ---
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(report, encoding="utf-8")
 
