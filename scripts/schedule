@@ -14,7 +14,7 @@ Commands:
 Schedule Format:
     Supports human-readable schedule expressions:
       "Mon 09:00"         — Every Monday at 9am
-      "Fri 17:00"          — Every Friday at 5pm
+      "Fri 18:00"          — Every Friday at 6pm
       "daily 08:00"        — Every day at 8am
       "weekday 09:00"      — Monday through Friday at 9am
       "Mon,Wed,Fri 14:00"  — Mon, Wed, Fri at 2pm
@@ -22,7 +22,7 @@ Schedule Format:
 
 Examples:
     # Schedule weekly report every Friday at 5pm
-    ./scripts/schedule add --name weekly-report --schedule "Fri 17:00" \\
+    ./scripts/schedule add --name weekly-report --schedule "Fri 18:00" \\
         --command "python3 /path/to/generate-weekly-report"
 
     # List all tasks
@@ -109,7 +109,7 @@ def parse_schedule(schedule_str: str) -> dict:
     # --- Time part: extract HH:MM ---
     time_match = re.search(r"(\d{1,2}):(\d{2})\s*$", schedule_str)
     if not time_match:
-        raise ValueError(f"Invalid time in schedule: {schedule_str!r}. Expected format like 'Fri 17:00'.")
+        raise ValueError(f"Invalid time in schedule: {schedule_str!r}. Expected format like 'Fri 18:00'.")
 
     hour = int(time_match.group(1))
     minute = int(time_match.group(2))
@@ -367,7 +367,7 @@ def cmd_add(args) -> None:
         name = _prompt("Task name", "weekly-report")
     if not schedule_str:
         print("  Format: Mon|Tue|Wed|Thu|Fri|Sat|Sun|weekday|daily HH:MM")
-        schedule_str = _prompt("Schedule", "Fri 17:00")
+        schedule_str = _prompt("Schedule", "Fri 18:00")
     if not command:
         default_cmd = f"python3 {PROJECT_DIR}/scripts/generate-weekly-report"
         command = _prompt("Command to run", default_cmd)
@@ -572,13 +572,13 @@ def main() -> None:
         epilog=textwrap.dedent("""\
             Schedule examples:
               "Mon 09:00"          Every Monday at 9am
-              "Fri 17:00"          Every Friday at 5pm
+              "Fri 18:00"          Every Friday at 6pm
               "Mon,Wed,Fri 14:00"  Mon, Wed, Fri at 2pm
               "weekday 08:00"      Mon-Fri at 8am
               "daily 08:00"        Every day at 8am
 
             Examples:
-              %(prog)s add --name weekly --schedule "Fri 17:00" --command "python3 /path/to/gen-report"
+              %(prog)s add --name weekly --schedule "Fri 18:00" --command "python3 /path/to/gen-report"
               %(prog)s list
               %(prog)s remove --name weekly
               %(prog)s show --name weekly
@@ -590,7 +590,7 @@ def main() -> None:
     # --- add ---
     add_parser = subparsers.add_parser("add", help="Add a scheduled task")
     add_parser.add_argument("--name", "-n", default="", help="Task name (e.g., 'weekly-report'). Prompted if omitted.")
-    add_parser.add_argument("--schedule", "-s", default="", help="Schedule expression (e.g., 'Fri 17:00'). Prompted if omitted.")
+    add_parser.add_argument("--schedule", "-s", default="", help="Schedule expression (e.g., 'Fri 18:00'). Prompted if omitted.")
     add_parser.add_argument("--command", "-c", default="", dest="cmd", help="Command to run. Prompted if omitted.")
 
     # --- list ---
