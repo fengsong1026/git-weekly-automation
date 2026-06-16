@@ -77,13 +77,16 @@ python3 scripts/collect-commits --scan ~/work --reset-state
 ### 3. 生成周报
 
 ```bash
-# 设置 API Key
-export OPENAI_API_KEY="your-api-key"
-# 或: --api-key your-key
+# 方式一：配置文件（推荐，gitignored）
+cp config.example.json config.json
+# 编辑 config.json
 
-# 自定义端点（兼容 OpenAI、DeepSeek、vLLM、Ollama 等）
+# 方式二：环境变量
+export OPENAI_API_KEY="your-api-key"
 export OPENAI_BASE_URL="https://api.deepseek.com/v1"
-# 或: --api-base https://your-endpoint/v1
+
+# 方式三：命令行参数（仅 api-base）
+python3 scripts/generate-weekly-report --api-base https://...
 
 # 默认：当前用户、本周一～今天、中文输出
 python3 scripts/generate-weekly-report
@@ -103,12 +106,15 @@ python3 scripts/generate-weekly-report --output reports/custom-name.md
 ### 4. 定时自动执行
 
 ```bash
-# 每周五下午 5 点自动生成周报
-./scripts/schedule add \
-  --name weekly-report \
-  --schedule "Fri 17:00" \
-  --command "python3 $PWD/scripts/generate-weekly-report" \
-  --api-key "your-api-key"
+# API Key 通过 config.json 或环境变量自动获取
+cp config.example.json config.json
+# 编辑 config.json 填入实际 key
+
+# 交互式添加（推荐 — 逐步引导输入，避免 shell 转义问题）
+./scripts/schedule add
+
+# 或一行命令添加
+./scripts/schedule add -n weekly-report -s "Fri 17:00" -c "python3 $PWD/scripts/generate-weekly-report"
 
 # 管理任务
 ./scripts/schedule list                        # 查看所有

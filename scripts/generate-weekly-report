@@ -50,6 +50,7 @@ from typing import Optional, Union
 # ---------------------------------------------------------------------------
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
+CONFIG_FILE = PROJECT_DIR / "config.json"
 DATA_DIR = PROJECT_DIR / "data" / "commits"
 REPORTS_DIR = PROJECT_DIR / "reports"
 DEFAULT_TEMPLATE = PROJECT_DIR / "templates" / "weekly-report.md"
@@ -57,6 +58,15 @@ DEFAULT_TEMPLATE = PROJECT_DIR / "templates" / "weekly-report.md"
 # OpenAI-compatible API settings
 OPENAI_DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
+
+def load_config() -> dict:
+    """Load project configuration from config.json."""
+    if CONFIG_FILE.exists():
+        try:
+            return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
 MAX_COMMITS_FOR_PROMPT = 300  # Truncate if more commits than this
 
 
@@ -411,12 +421,6 @@ Examples:
         help="Output file path (default: reports/weekly-YYYY-WXX.md)",
     )
     parser.add_argument(
-        "-k", "--api-key",
-        type=str,
-        default=None,
-        help="API key (default: $OPENAI_API_KEY)",
-    )
-    parser.add_argument(
         "--api-base",
         type=str,
         default=None,
@@ -467,15 +471,21 @@ Examples:
             sys.exit(1)
     # else: --all-authors → no filter, include everyone
 
-    # Resolve API key — check argument, then OPENAI_API_KEY, then ANTHROPIC_API_KEY (legacy)
-    api_key = args.api_key or os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
+    # Resolve API key: env var > config.json
+    config = load_config()
+    api_key = os.environ.get("OPENAI_API_KEY") or config.get("api_key", "")
     if not args.dry_run and not api_key:
-        print("[!] No API key provided. Set OPENAI_API_KEY env var or use --api-key.", file=sys.stderr)
+        print("[!] No API key found (checked: $OPENAI_API_KEY, config.json).", file=sys.stderr)
         print("[!] Running in dry-run mode instead.", file=sys.stderr)
         args.dry_run = True
 
-    # Resolve API base URL
-    api_base = args.api_base or os.environ.get("OPENAI_BASE_URL") or OPENAI_DEFAULT_BASE_URL
+    # Resolve API base URL: CLI flag > env var > config.json > default
+    api_base = (
+        args.api_base
+        or os.environ.get("OPENAI_BASE_URL")
+        or config.get("api_base")
+        or OPENAI_DEFAULT_BASE_URL
+    )
 
     # --- Step 1: Determine date range ---
     monday, sunday, week_label = get_week_dates(args.week, args.year)

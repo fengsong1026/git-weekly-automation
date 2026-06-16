@@ -36,6 +36,7 @@ Examples:
 """
 
 import argparse
+import json
 import os
 import plistlib
 import re
@@ -52,8 +53,32 @@ from datetime import datetime
 # ---------------------------------------------------------------------------
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
+CONFIG_FILE = PROJECT_DIR / "config.json"
 LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
 LABEL_PREFIX = "com.git-report"
+
+# ---------------------------------------------------------------------------
+# Config loading
+# ---------------------------------------------------------------------------
+
+def load_config() -> dict:
+    """Load project configuration from config.json."""
+    if CONFIG_FILE.exists():
+        try:
+            return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+def resolve_api_key() -> Optional[str]:
+    """
+    Resolve API key with priority: env var > config file.
+    """
+    env_key = os.environ.get("OPENAI_API_KEY")
+    if env_key:
+        return env_key
+    config = load_config()
+    return config.get("api_key")
 
 # Day name to number mapping (Sunday=0 in Apple's calendar)
 DAY_MAP = {
@@ -312,17 +337,56 @@ def launchctl_is_loaded(name: str) -> bool:
 # Commands
 # ---------------------------------------------------------------------------
 
-def cmd_add(args) -> None:
-    """Add a new scheduled task."""
-    plist_path_obj = plist_path(args.name)
+def _prompt(prompt_text: str, default: str = "") -> str:
+    """Prompt the user for input with an optional default value."""
+    if default:
+        prompt_text = f"{prompt_text} [{default}]"
+    prompt_text = f"{prompt_text}: "
+    try:
+        value = input(prompt_text).strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\n[!] Cancelled.", file=sys.stderr)
+        sys.exit(1)
+    return value if value else default
 
-    if plist_path_obj.exists():
-        print(f"[!] Task {args.name!r} already exists. Use 'remove' first to replace it.", file=sys.stderr)
+
+def cmd_add(args) -> None:
+    """Add a new scheduled task. Runs interactively if required args are missing."""
+    name = args.name
+    schedule_str = args.schedule
+    command = args.cmd
+
+    # Interactive mode: prompt for any missing required values
+    if not name or not schedule_str or not command:
+        print("═" * 50)
+        print("  Schedule a new task — interactive mode")
+        print("═" * 50)
+        print()
+
+    if not name:
+        name = _prompt("Task name", "weekly-report")
+    if not schedule_str:
+        print("  Format: Mon|Tue|Wed|Thu|Fri|Sat|Sun|weekday|daily HH:MM")
+        schedule_str = _prompt("Schedule", "Fri 17:00")
+    if not command:
+        default_cmd = f"python3 {PROJECT_DIR}/scripts/generate-weekly-report"
+        command = _prompt("Command to run", default_cmd)
+
+    # Validate
+    if not name or not schedule_str or not command:
+        print("[!] All fields are required.", file=sys.stderr)
         sys.exit(1)
 
-    # Build the plist
+    plist_path_obj = plist_path(name)
+
+    if plist_path_obj.exists():
+        print(f"[!] Task {name!r} already exists. Use 'remove' first to replace it.", file=sys.stderr)
+        sys.exit(1)
+
+    # Build the plist (auto-resolve API key from env or config.json)
+    api_key = resolve_api_key()
     try:
-        plist = build_plist(args.name, args.command, args.schedule, args.api_key)
+        plist = build_plist(name, command, schedule_str, api_key)
     except ValueError as e:
         print(f"[!] {e}", file=sys.stderr)
         sys.exit(1)
@@ -332,13 +396,34 @@ def cmd_add(args) -> None:
     with open(plist_path_obj, "wb") as f:
         plistlib.dump(plist, f)
 
-    print(f"[✓] Task created: {plist_path_obj}")
-    print(f"    Schedule: {schedule_to_string(plist.get('StartCalendarInterval', {}))}")
-    print(f"    Command: {args.command}")
+    print(f"\n[✓] Task created: {plist_path_obj}")
+    schedule_desc = schedule_to_string(plist.get('StartCalendarInterval', {}))
+    print(f"    Schedule: {schedule_desc}")
+    print(f"    Command: {command}")
 
     # Load the agent
     launchctl_bootstrap(plist_path_obj)
-    print(f"[✓] Task loaded and active.")
+    print(f"[✓] Task loaded. Next run: {schedule_desc}")
+
+    # Offer to run once immediately for verification
+    print()
+    try:
+        run_now = input("Run command now to verify? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        run_now = ""
+
+    if run_now in ("y", "yes"):
+        log_dir = PROJECT_DIR / "data" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[*] Running: {command}")
+        print("-" * 50)
+        env = {**os.environ, **plist.get("EnvironmentVariables", {})}
+        result = subprocess.run(command, shell=True, cwd=str(PROJECT_DIR), env=env)
+        print("-" * 50)
+        if result.returncode == 0:
+            print("[✓] Command completed successfully.")
+        else:
+            print(f"[!] Command exited with code {result.returncode}.")
 
 
 def cmd_list(args) -> None:
@@ -415,7 +500,16 @@ def cmd_show(args) -> None:
     print(f"  Plist file: {pp}")
     env = plist.get("EnvironmentVariables", {})
     if env:
-        print(f"  Env vars:   {', '.join(k for k in env if k != 'PATH' and k != 'HOME')}")
+        masked = []
+        for k in sorted(env):
+            if k in ("PATH", "HOME"):
+                continue
+            v = env[k]
+            if k.endswith("API_KEY") and len(v) > 8:
+                v = v[:4] + "****" + v[-4:]
+            masked.append(f"{k}={v}")
+        if masked:
+            print(f"  Env vars:   {', '.join(masked)}")
     print("═" * 60)
 
     # Show recent log output if available
@@ -465,10 +559,9 @@ def main() -> None:
 
     # --- add ---
     add_parser = subparsers.add_parser("add", help="Add a scheduled task")
-    add_parser.add_argument("--name", "-n", required=True, help="Task name (e.g., 'weekly-report')")
-    add_parser.add_argument("--schedule", "-s", required=True, help="Schedule expression (e.g., 'Fri 17:00')")
-    add_parser.add_argument("--command", "-c", required=True, help="Command to run")
-    add_parser.add_argument("--api-key", "-k", default=None, help="OpenAI-compatible API key for environment (sets OPENAI_API_KEY)")
+    add_parser.add_argument("--name", "-n", default="", help="Task name (e.g., 'weekly-report'). Prompted if omitted.")
+    add_parser.add_argument("--schedule", "-s", default="", help="Schedule expression (e.g., 'Fri 17:00'). Prompted if omitted.")
+    add_parser.add_argument("--command", "-c", default="", dest="cmd", help="Command to run. Prompted if omitted.")
 
     # --- list ---
     subparsers.add_parser("list", aliases=["ls"], help="List all scheduled tasks")
