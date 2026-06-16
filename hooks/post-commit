@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# ============================================================================
+# git-report global post-commit hook
+#
+# Captures commit metadata after every successful `git commit` and appends
+# it as a JSON line to a weekly log file in:
+#   ~/development/lifecycle/git-report/data/commits/
+#
+# This hook is intended to be set globally via:
+#   git config --global core.hooksPath "<path-to-this-project>/hooks"
+#
+# It never blocks a commit — failures are silent and always exit 0.
+# ============================================================================
+
+set -euo pipefail
+
+# Determine the data directory (relative to this project)
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$HOOK_DIR/.." && pwd)"
+DATA_DIR="$PROJECT_DIR/data/commits"
+
+# Ensure the data directory exists
+mkdir -p "$DATA_DIR"
+
+# --- Gather commit metadata ---
+HASH="$(git rev-parse HEAD 2>/dev/null || true)"
+if [ -z "$HASH" ]; then
+    exit 0
+fi
+
+AUTHOR="$(git log -1 --format='%an' 2>/dev/null || true)"
+EMAIL="$(git log -1 --format='%ae' 2>/dev/null || true)"
+TIMESTAMP="$(git log -1 --format='%aI' 2>/dev/null || true)"
+# Use %B for full commit message (subject + body)
+RAW_MESSAGE="$(git log -1 --format='%B' 2>/dev/null || true)"
+REPO="$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || true)"
+REPO_PATH="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+HOSTNAME="$(hostname 2>/dev/null || echo "unknown")"
+
+# --- Dedup: skip if this commit hash already exists in this week's file ---
+WEEK_FILE="$DATA_DIR/$(date +%G-W%V).jsonl"
+if [ -f "$WEEK_FILE" ] && grep -q "\"hash\":\"$HASH\"" "$WEEK_FILE" 2>/dev/null; then
+    exit 0
+fi
+
+# Use jq to safely construct valid JSON with proper escaping
+if command -v jq &>/dev/null; then
+    jq -nc '{
+        hash: $hash,
+        author: $author,
+        email: $email,
+        timestamp: $timestamp,
+        message: $message,
+        repo: $repo,
+        repo_path: $repo_path,
+        branch: $branch,
+        hostname: $hostname
+    }' \
+        --arg hash "$HASH" \
+        --arg author "$AUTHOR" \
+        --arg email "$EMAIL" \
+        --arg timestamp "$TIMESTAMP" \
+        --arg message "$RAW_MESSAGE" \
+        --arg repo "$REPO" \
+        --arg repo_path "$REPO_PATH" \
+        --arg branch "$BRANCH" \
+        --arg hostname "$HOSTNAME" \
+        >> "$WEEK_FILE" 2>/dev/null || true
+else
+    # Fallback: use Python to construct JSON if jq is not available
+    python3 -c "
+import json, sys, os
+entry = {
+    'hash': os.environ.get('HASH', ''),
+    'author': os.environ.get('AUTHOR', ''),
+    'email': os.environ.get('EMAIL', ''),
+    'timestamp': os.environ.get('TIMESTAMP', ''),
+    'message': os.environ.get('MESSAGE', ''),
+    'repo': os.environ.get('REPO', ''),
+    'repo_path': os.environ.get('REPO_PATH', ''),
+    'branch': os.environ.get('BRANCH', ''),
+    'hostname': os.environ.get('HOSTNAME', ''),
+}
+with open(os.environ['WEEK_FILE'], 'a') as f:
+    f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+" HASH="$HASH" \
+  AUTHOR="$AUTHOR" \
+  EMAIL="$EMAIL" \
+  TIMESTAMP="$TIMESTAMP" \
+  MESSAGE="$RAW_MESSAGE" \
+  REPO="$REPO" \
+  REPO_PATH="$REPO_PATH" \
+  BRANCH="$BRANCH" \
+  HOSTNAME="$HOSTNAME" \
+  WEEK_FILE="$WEEK_FILE" \
+  2>/dev/null || true
+fi
+
+# Always exit 0 — never block a commit
+exit 0

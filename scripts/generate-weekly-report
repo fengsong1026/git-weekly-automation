@@ -1,0 +1,567 @@
+#!/usr/bin/env python3
+"""
+git-report — AI-Powered Weekly Report Generator
+
+Reads commit logs from data/commits/, combines them with a weekly report
+template, and calls an OpenAI-compatible chat completions API to generate
+a natural-language weekly work report.
+
+Works with any OpenAI-compatible service: OpenAI, DeepSeek, vLLM, Ollama,
+LiteLLM proxy, or any custom endpoint that implements the
+/v1/chat/completions interface.
+
+Usage:
+    # Generate a report for the current week (default: this Monday–today)
+    python3 scripts/generate-weekly-report
+
+    # Generate a report for a specific ISO week
+    python3 scripts/generate-weekly-report --week 24
+
+    # Dry run — print the prompt without calling the API
+    python3 scripts/generate-weekly-report --dry-run
+
+    # Use a custom template
+    python3 scripts/generate-weekly-report --template my-template.md
+
+    # Specify output file
+    python3 scripts/generate-weekly-report --output reports/my-report.md
+
+    # Use a custom API endpoint
+    python3 scripts/generate-weekly-report --api-base https://api.deepseek.com/v1
+
+Environment:
+    OPENAI_API_KEY  — API key (can also be passed via --api-key)
+    OPENAI_BASE_URL — API base URL (can also be passed via --api-base)
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Optional, Union
+
+
+# ---------------------------------------------------------------------------
+# Path resolution — everything is relative to this script
+# ---------------------------------------------------------------------------
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = SCRIPT_DIR.parent
+DATA_DIR = PROJECT_DIR / "data" / "commits"
+REPORTS_DIR = PROJECT_DIR / "reports"
+DEFAULT_TEMPLATE = PROJECT_DIR / "templates" / "weekly-report.md"
+
+# OpenAI-compatible API settings
+OPENAI_DEFAULT_BASE_URL = "https://api.deepseek.com"
+DEFAULT_MODEL = "deepseek-v4-flash"
+MAX_COMMITS_FOR_PROMPT = 300  # Truncate if more commits than this
+
+
+# ---------------------------------------------------------------------------
+# Date helpers
+# ---------------------------------------------------------------------------
+
+def get_week_dates(week_number: Optional[int], year: Optional[int] = None) -> tuple:
+    """
+    Return (monday, today_or_sunday, iso_week_label) for the given ISO week.
+    If week_number is None, return current week (this Monday–today).
+    Week 1 of a year is the week containing the first Thursday.
+    """
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    if week_number is None:
+        # Current week: this Monday through today
+        monday = today - timedelta(days=today.weekday())
+    else:
+        if year is None:
+            year = today.year
+        # ISO week 1 starts on the Monday of the week containing Jan 4
+        jan4 = datetime(year, 1, 4, tzinfo=timezone.utc)
+        monday_week1 = jan4 - timedelta(days=jan4.weekday())
+        monday = monday_week1 + timedelta(weeks=week_number - 1)
+
+    iso_year, iso_week, _ = monday.isocalendar()
+    label = f"W{iso_week:02d} ({iso_year})"
+
+    if week_number is None:
+        # Current week: end at today 23:59:59 (not the upcoming Sunday)
+        end = today.replace(hour=23, minute=59, second=59)
+    else:
+        end = monday + timedelta(days=6)
+        end = end.replace(hour=23, minute=59, second=59)
+
+    return monday, end, label
+
+
+def format_date(dt: datetime) -> str:
+    """Format date as YYYY-MM-DD."""
+    return dt.strftime("%Y-%m-%d")
+
+
+# ---------------------------------------------------------------------------
+# Commit log reading
+# ---------------------------------------------------------------------------
+
+def get_git_user_email() -> str:
+    """Auto-detect the current git user email from global config."""
+    try:
+        result = subprocess.run(
+            ["git", "config", "--global", "user.email"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    return ""
+
+
+def read_commits(monday: datetime, sunday: datetime, author: Optional[str] = None) -> list[dict]:
+    """
+    Read all commits within the given date range from data/commits/*.jsonl.
+    If `author` is provided, only include commits whose email matches.
+    Returns a list of commit dicts sorted by timestamp.
+    """
+    commits: list[dict] = []
+
+    if not DATA_DIR.exists():
+        print(f"[!] No commit data directory found at: {DATA_DIR}", file=sys.stderr)
+        print("[!] Make sure git hooks are set up (run scripts/setup)", file=sys.stderr)
+        return commits
+
+    # Determine which weekly files could contain commits in this range
+    # A week range can span at most 2 ISO weeks (when the range crosses a week boundary)
+    files_to_read: list[Path] = []
+    seen: set[str] = set()
+    # Check each day in the range to cover week boundaries
+    current_day = monday
+    while current_day <= sunday:
+        iso_year, iso_week, _ = current_day.isocalendar()
+        week_key = f"{iso_year}-W{iso_week:02d}"
+        if week_key not in seen:
+            seen.add(week_key)
+            week_file = DATA_DIR / f"{week_key}.jsonl"
+            if week_file.exists():
+                files_to_read.append(week_file)
+        current_day += timedelta(days=1)
+
+    if not files_to_read:
+        print(f"[!] No commit log files found for {format_date(monday)} to {format_date(sunday)}", file=sys.stderr)
+        return commits
+
+    # Read and filter
+    for filepath in files_to_read:
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    # Parse timestamp and filter by date range
+                    ts_str = entry.get("timestamp", "")
+                    if not ts_str:
+                        continue
+                    try:
+                        ts = datetime.fromisoformat(ts_str)
+                        # Handle timezone awareness
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=timezone.utc)
+                    except (ValueError, TypeError):
+                        continue
+
+                    if monday <= ts <= sunday:
+                        if author and entry.get("email", "") != author:
+                            continue
+                        commits.append(entry)
+        except OSError as e:
+            print(f"[!] Error reading {filepath}: {e}", file=sys.stderr)
+            continue
+
+    # Sort by timestamp
+    commits.sort(key=lambda c: c.get("timestamp", ""))
+    return commits
+
+
+# ---------------------------------------------------------------------------
+# Commit grouping & formatting for the prompt
+# ---------------------------------------------------------------------------
+
+def group_commits_by_repo(commits: list[dict]) -> dict[str, list[dict]]:
+    """Group commits by repository name."""
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for c in commits:
+        repo = c.get("repo", "unknown")
+        grouped[repo].append(c)
+    # Sort repos by commit count descending
+    return dict(sorted(grouped.items(), key=lambda kv: len(kv[1]), reverse=True))
+
+
+def format_commit_list(commits: list[dict]) -> str:
+    """
+    Format commits into a concise, prompt-friendly text grouped by repo.
+    If there are too many commits, truncate and note it.
+    """
+    total = len(commits)
+    truncated = total > MAX_COMMITS_FOR_PROMPT
+    display_commits = commits[:MAX_COMMITS_FOR_PROMPT] if truncated else commits
+
+    grouped = group_commits_by_repo(display_commits)
+
+    lines: list[str] = []
+    for repo, repo_commits in grouped.items():
+        lines.append(f"\n### {repo} ({len(repo_commits)} commits)")
+        for c in repo_commits:
+            ts = c.get("timestamp", "?")[:10]  # Just the date part
+            author = c.get("author", "?")
+            branch = c.get("branch", "?")
+            message_lines = c.get("message", "").strip().split("\n")
+            subject = message_lines[0] if message_lines else "(no message)"
+
+            lines.append(f"- [{ts}] [{branch}] {author}: {subject}")
+
+    output = "\n".join(lines)
+
+    if truncated:
+        output += f"\n\n> ⚠️  **Note:** {total - MAX_COMMITS_FOR_PROMPT} additional commits omitted due to volume."
+
+    return output
+
+
+# ---------------------------------------------------------------------------
+# Template processing
+# ---------------------------------------------------------------------------
+
+def load_template(template_path: Path) -> str:
+    """Load the report template from a file."""
+    if not template_path.exists():
+        print(f"[!] Template not found: {template_path}", file=sys.stderr)
+        print("[!] Using built-in minimal template.", file=sys.stderr)
+        return DEFAULT_TEMPLATE_CONTENT
+    return template_path.read_text(encoding="utf-8")
+
+
+DEFAULT_TEMPLATE_CONTENT = """\
+# 周工作报告 — {{WEEK}}（{{DATE_RANGE}}）
+
+## 概览
+
+## 各项目工作
+
+{{COMMITS}}
+
+## 重点亮点
+
+## 挑战与阻塞
+
+## 下周计划
+
+---
+
+> 📊 基于 {{COMMIT_COUNT}} 条提交（{{REPO_COUNT}} 个项目）生成
+"""
+
+
+def fill_template(template: str, variables: dict[str, str]) -> str:
+    """Replace {{PLACEHOLDERS}} in the template with values."""
+    result = template
+    for key, value in variables.items():
+        result = result.replace("{{" + key + "}}", value)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# OpenAI-compatible API call
+# ---------------------------------------------------------------------------
+
+def build_system_prompt() -> str:
+    """Build the system prompt for the AI model."""
+    return """你是一名专业的技术周报撰写人。你的任务是根据 git 提交历史，\
+生成一份简洁、结构清晰的周工作报告。
+
+撰写要求：
+- 使用简体中文输出，专业且自然——像一个技术负责人向管理者总结团队本周的工作。
+- 按项目分组。对每个项目，从高层次描述"做了什么"和"为什么"——不要只罗列提交记录。
+- 识别跨提交的主题和模式（例如"本周专注于认证模块重构"）。
+- 突出重要变更、新功能、缺陷修复和关键重构。
+- 记录任何未完成的工作或进行中的分支，以反映持续进行的任务。
+- 报告应简洁但充实，3-5 分钟内可读完。
+- 每个章节使用项目符号以提高可读性。
+- 填写模板的所有章节——不要留空。如果某章节确实没有内容，写"本周无相关内容。"
+- 保留模板的 markdown 结构不变。
+- 只输出最终的周报 markdown——不要添加前言或评论。"""
+
+
+def call_openai_compatible_api(
+    system_prompt: str,
+    user_message: str,
+    api_key: str,
+    model: str,
+    api_base_url: str,
+    max_tokens: int = 4096,
+) -> str:
+    """
+    Call an OpenAI-compatible Chat Completions API and return the response text.
+
+    Uses the openai Python SDK if available, otherwise falls back to urllib
+    (stdlib — no extra dependencies).
+    """
+    # Build messages in OpenAI format
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": user_message})
+
+    # Prefer the openai SDK if available
+    try:
+        import openai
+
+        client = openai.OpenAI(api_key=api_key, base_url=api_base_url, max_retries=2)
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_tokens=max_tokens,
+        )
+        content = response.choices[0].message.content
+        return content or ""
+
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"[!] openai SDK error, falling back to HTTP: {e}", file=sys.stderr)
+
+    # Fallback: use urllib (stdlib — no extra deps)
+    import urllib.request
+    import urllib.error
+
+    api_url = api_base_url.rstrip("/") + "/chat/completions"
+
+    payload = json.dumps({
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+    }).encode("utf-8")
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    req = urllib.request.Request(api_url, data=payload, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            return body["choices"][0]["message"]["content"]
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8") if e.fp else ""
+        raise RuntimeError(f"API error {e.code}: {error_body}") from e
+    except (KeyError, IndexError) as e:
+        raise RuntimeError(f"Unexpected API response format: {e}") from e
+    except Exception as e:
+        raise RuntimeError(f"API request failed: {e}") from e
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Generate an AI-powered weekly work report from git commit logs.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s                           # Report for current week (Mon–today)
+  %(prog)s --week 24                 # Report for ISO week 24
+  %(prog)s --week 24 --year 2025     # Specific week and year
+  %(prog)s --dry-run                 # Print the prompt, don't call API
+  %(prog)s --template custom.md      # Use a custom template
+  %(prog)s --output reports/my.md    # Custom output path
+        """.strip(),
+    )
+    parser.add_argument(
+        "-w", "--week",
+        type=int,
+        default=None,
+        help="ISO week number (default: current week, Mon–today)",
+    )
+    parser.add_argument(
+        "--year",
+        type=int,
+        default=None,
+        help="Year for the week (default: current year)",
+    )
+    parser.add_argument(
+        "-t", "--template",
+        type=Path,
+        default=DEFAULT_TEMPLATE,
+        help=f"Path to report template (default: {DEFAULT_TEMPLATE})",
+    )
+    parser.add_argument(
+        "-o", "--output",
+        type=Path,
+        default=None,
+        help="Output file path (default: reports/weekly-YYYY-WXX.md)",
+    )
+    parser.add_argument(
+        "-k", "--api-key",
+        type=str,
+        default=None,
+        help="API key (default: $OPENAI_API_KEY)",
+    )
+    parser.add_argument(
+        "--api-base",
+        type=str,
+        default=None,
+        help=f"OpenAI-compatible API base URL (default: $OPENAI_BASE_URL or {OPENAI_DEFAULT_BASE_URL})",
+    )
+    parser.add_argument(
+        "-m", "--model",
+        type=str,
+        default=DEFAULT_MODEL,
+        help=f"Model name to use (default: {DEFAULT_MODEL})",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the prompt without calling the API",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=4096,
+        help="Max tokens for API response (default: 4096)",
+    )
+    parser.add_argument(
+        "--author", "-a",
+        type=str,
+        default=None,
+        help="Only include commits by this author email (overrides default auto-detect)",
+    )
+    parser.add_argument(
+        "--all-authors",
+        action="store_true",
+        help="Include commits from all authors (disable default current-user filter)",
+    )
+
+    args = parser.parse_args()
+
+    # Resolve author filter — defaults to current git user unless --all-authors
+    author_filter: Optional[str] = None
+    if args.author:
+        author_filter = args.author
+        print(f"[*] Only including commits by: {author_filter}")
+    elif not args.all_authors:
+        author_filter = get_git_user_email()
+        if author_filter:
+            print(f"[*] Only including commits by (current git user): {author_filter}")
+        else:
+            print("[!] Could not detect git user email. Use --all-authors to include all, or --author to specify.", file=sys.stderr)
+            sys.exit(1)
+    # else: --all-authors → no filter, include everyone
+
+    # Resolve API key — check argument, then OPENAI_API_KEY, then ANTHROPIC_API_KEY (legacy)
+    api_key = args.api_key or os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
+    if not args.dry_run and not api_key:
+        print("[!] No API key provided. Set OPENAI_API_KEY env var or use --api-key.", file=sys.stderr)
+        print("[!] Running in dry-run mode instead.", file=sys.stderr)
+        args.dry_run = True
+
+    # Resolve API base URL
+    api_base = args.api_base or os.environ.get("OPENAI_BASE_URL") or OPENAI_DEFAULT_BASE_URL
+
+    # --- Step 1: Determine date range ---
+    monday, sunday, week_label = get_week_dates(args.week, args.year)
+    date_range = f"{format_date(monday)} → {format_date(sunday)}"
+    print(f"[*] Week: {week_label} ({date_range})")
+
+    # --- Step 2: Read commits ---
+    print(f"[*] Reading commit logs from {DATA_DIR} ...")
+    commits = read_commits(monday, sunday, author_filter)
+    print(f"[*] Found {len(commits)} commits")
+
+    if not commits:
+        print("\n[!] No commits found for this week.")
+        print("[!] Make some commits first, then re-run this script.")
+        sys.exit(1)
+
+    # --- Step 3: Format commits ---
+    formatted_commits = format_commit_list(commits)
+    repo_count = len(group_commits_by_repo(commits))
+
+    # --- Step 4: Load & fill template ---
+    template = load_template(args.template)
+    prompt_variables = {
+        "WEEK": week_label,
+        "DATE_RANGE": date_range,
+        "COMMITS": formatted_commits,
+        "COMMIT_COUNT": str(len(commits)),
+        "REPO_COUNT": str(repo_count),
+        "GENERATED_AT": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    }
+    filled_template = fill_template(template, prompt_variables)
+
+    # --- Step 5: Build prompts ---
+    system_prompt = build_system_prompt()
+    user_message = f"""请根据以下模板和提交数据生成一份周工作报告。\
+根据提交内容填写模板的所有章节。
+
+## 模板
+
+{filled_template}
+
+请将"各项目工作"下的提交列表替换为你的叙述性总结\
+（按项目分组，描述完成了什么工作）。保留所有章节标题和\
+整体结构。以 markdown 格式输出完整报告，使用简体中文。"""
+
+    if args.dry_run:
+        print("\n" + "=" * 60)
+        print("  DRY RUN — PROMPT SENT TO AI")
+        print("=" * 60)
+        print(f"\n--- SYSTEM PROMPT ({len(system_prompt)} chars) ---")
+        print(system_prompt)
+        print(f"\n--- USER MESSAGE ({len(user_message)} chars) ---")
+        print(user_message)
+        print("\n" + "=" * 60)
+        print("  END DRY RUN")
+        print("=" * 60)
+        return
+
+    # --- Step 6: Call API ---
+    print(f"[*] Calling API (model: {args.model}, base: {api_base}) ...")
+    try:
+        report = call_openai_compatible_api(
+            system_prompt=system_prompt,
+            user_message=user_message,
+            api_key=api_key,
+            model=args.model,
+            api_base_url=api_base,
+            max_tokens=args.max_tokens,
+        )
+        print(f"[*] Received response ({len(report)} chars)")
+    except Exception as e:
+        print(f"\n[!] API call failed: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # --- Step 7: Save report ---
+    if args.output:
+        output_path = args.output
+    else:
+        output_path = REPORTS_DIR / f"weekly-{week_label.replace(' ', '-').replace('(', '').replace(')', '')}.md"
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(report, encoding="utf-8")
+
+    print(f"\n[✓] Weekly report saved to: {output_path}")
+    print(f"[✓] Report length: {len(report)} chars / ~{len(report.splitlines())} lines")
+
+
+if __name__ == "__main__":
+    main()

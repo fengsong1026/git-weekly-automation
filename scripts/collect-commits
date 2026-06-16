@@ -1,0 +1,578 @@
+#!/usr/bin/env python3
+"""
+git-report — Commit Collector (Directory Scanner)
+
+Scans one or more directories for git repositories (any subdirectory
+containing a .git folder), runs `git log` in each to fetch commit
+history, and aggregates the results into data/commits/YYYY-WXX.jsonl.
+
+This complements the global post-commit hook by:
+  - Backfilling commits from repos that existed before the hook was set up
+  - Periodically syncing commits from repos that may not have the hook active
+  - Pulling commits from shared/mounted directories
+
+Usage:
+    # Scan a single directory
+    python3 scripts/collect-commits --scan ~/work
+
+    # Scan multiple directories
+    python3 scripts/collect-commits --scan ~/projects --scan ~/work
+
+    # Only collect commits since a specific date
+    python3 scripts/collect-commits --scan ~/work --since 2026-06-01
+
+    # Collect commits for a specific date range
+    python3 scripts/collect-commits --scan ~/work --since 2026-06-01 --until 2026-06-14
+
+    # Dry run — list repos and commit counts without saving
+    python3 scripts/collect-commits --scan ~/work --dry-run
+
+    # Limit scan depth (default: 3 levels deep)
+    python3 scripts/collect-commits --scan ~/work --max-depth 5
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Optional, Set
+
+# ---------------------------------------------------------------------------
+# Path resolution
+# ---------------------------------------------------------------------------
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = SCRIPT_DIR.parent
+DATA_DIR = PROJECT_DIR / "data" / "commits"
+STATE_FILE = PROJECT_DIR / "data" / "collect-state.json"
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def get_git_user_email() -> str:
+    """Auto-detect the current git user email from global config."""
+    try:
+        result = subprocess.run(
+            ["git", "config", "--global", "user.email"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    return ""
+
+
+def _is_git_repo(path: Path) -> bool:
+    """
+    Check if `path` is a git repository root.
+    Returns True if path contains a .git directory (regular repo)
+    OR a .git file (submodule).
+    """
+    git_path = path / ".git"
+    return git_path.is_dir() or git_path.is_file()
+
+
+def find_git_repos(root: Path, max_depth: int = 3) -> list[Path]:
+    """
+    Walk `root` directory up to `max_depth` levels looking for git repos
+    (directories containing .git as a directory OR as a file, supporting
+    submodules). Returns a list of repo root paths.
+    """
+    repos: list[Path] = []
+    root = root.resolve()
+
+    if not root.is_dir():
+        print(f"[!] Not a directory, skipping: {root}", file=sys.stderr)
+        return repos
+
+    # Check root itself
+    if _is_git_repo(root):
+        repos.append(root)
+
+    # Walk subdirectories regardless — a repo may contain submodules
+    # (which look like regular dirs but have a .git file instead of dir)
+    try:
+        for entry in sorted(root.iterdir()):
+            if not entry.is_dir() or entry.name.startswith("."):
+                continue
+
+            git_path = entry / ".git"
+            if git_path.is_dir():
+                # Regular git repo — add it, but also recurse into it
+                # for potential submodules
+                repos.append(entry)
+                if max_depth > 1:
+                    repos.extend(_find_submodules_only(entry, max_depth - 1))
+            elif git_path.is_file():
+                # Submodule — .git is a file pointing to the real git dir
+                repos.append(entry)
+            elif max_depth > 1:
+                # Not a repo — recurse deeper
+                repos.extend(find_git_repos(entry, max_depth - 1))
+    except PermissionError:
+        print(f"[!] Permission denied: {root}", file=sys.stderr)
+
+    return sorted(set(repos))
+
+
+def _find_submodules_only(root: Path, max_depth: int) -> list[Path]:
+    """
+    Inside a known git repo, look only for submodules (dirs with .git file).
+    Does NOT add regular repos — those are part of the parent repo's tree.
+    """
+    submodules: list[Path] = []
+    try:
+        for entry in sorted(root.iterdir()):
+            if not entry.is_dir() or entry.name.startswith("."):
+                continue
+            git_path = entry / ".git"
+            if git_path.is_file():
+                # Submodule found — add it and recurse into it for nested submodules
+                submodules.append(entry)
+                if max_depth > 1:
+                    submodules.extend(_find_submodules_only(entry, max_depth - 1))
+            elif git_path.is_dir():
+                # Nested regular repo (unusual but possible) — add it
+                submodules.append(entry)
+            elif max_depth > 1:
+                # Regular directory — could contain nested submodules
+                submodules.extend(_find_submodules_only(entry, max_depth - 1))
+    except PermissionError:
+        pass
+    return submodules
+
+    return sorted(set(repos))
+
+
+def load_existing_hashes(month_file: Path) -> Set[str]:
+    """Load all commit hashes already present in a monthly JSONL file."""
+    hashes: Set[str] = set()
+    if not month_file.exists():
+        return hashes
+    try:
+        with open(month_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                    h = entry.get("hash", "")
+                    if h:
+                        hashes.add(h)
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        pass
+    return hashes
+
+
+def load_all_existing_hashes() -> Set[str]:
+    """Load all hashes from all monthly JSONL files."""
+    all_hashes: Set[str] = set()
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    for f in sorted(DATA_DIR.glob("*.jsonl")):
+        all_hashes.update(load_existing_hashes(f))
+    return all_hashes
+
+
+def load_state() -> dict:
+    """Load the collection state (last-sync timestamps per repo)."""
+    if STATE_FILE.exists():
+        try:
+            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def save_state(state: dict) -> None:
+    """Save the collection state."""
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def get_commit_count(repo_path: Path, since: Optional[str] = None, until: Optional[str] = None, author: Optional[str] = None) -> int:
+    """Count commits in a repo within the given date range."""
+    cmd = ["git", "-C", str(repo_path), "log", "--format=%H"]
+    if since:
+        cmd.append(f"--since={since}")
+    if until:
+        cmd.append(f"--until={until}")
+    if author:
+        cmd.append(f"--author={author}")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            return 0
+        return len([l for l in result.stdout.strip().split("\n") if l])
+    except (subprocess.TimeoutExpired, OSError):
+        return 0
+
+
+def collect_commits_from_repo(
+    repo_path: Path,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    existing_hashes: Optional[Set[str]] = None,
+    author: Optional[str] = None,
+) -> list[dict]:
+    """
+    Collect commit metadata from a single git repository.
+
+    Returns a list of commit dicts (same format as the post-commit hook)
+    for commits that aren't already in existing_hashes.
+    If `author` is provided, only commits by that author are collected.
+    """
+    if existing_hashes is None:
+        existing_hashes = set()
+
+    commits: list[dict] = []
+
+    # Build git log command to get commit hashes
+    cmd = ["git", "-C", str(repo_path), "log", "--format=%H"]
+    if since:
+        cmd.append(f"--since={since}")
+    if until:
+        cmd.append(f"--until={until}")
+    if author:
+        cmd.append(f"--author={author}")
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            print(f"  [!] git log failed in {repo_path.name}: {result.stderr.strip()}", file=sys.stderr)
+            return commits
+    except subprocess.TimeoutExpired:
+        print(f"  [!] git log timed out in {repo_path.name}", file=sys.stderr)
+        return commits
+    except OSError as e:
+        print(f"  [!] Error running git in {repo_path.name}: {e}", file=sys.stderr)
+        return commits
+
+    hashes = [h.strip() for h in result.stdout.strip().split("\n") if h.strip()]
+
+    if not hashes:
+        return commits
+
+    # Filter to new hashes only
+    new_hashes = [h for h in hashes if h not in existing_hashes]
+    if not new_hashes:
+        return commits
+
+    print(f"  [*] {len(new_hashes)} new commits (of {len(hashes)} total)")
+
+    # Fetch details for each new commit
+    for i, h in enumerate(new_hashes):
+        try:
+            detail = subprocess.run(
+                [
+                    "git", "-C", str(repo_path), "log", "-1",
+                    "--format=%H%x00%an%x00%ae%x00%aI%x00%B",
+                    h,
+                ],
+                capture_output=True, text=True, timeout=10,
+            )
+            if detail.returncode != 0:
+                continue
+
+            # Parse null-delimited fields
+            parts = detail.stdout.split("\0")
+            if len(parts) < 5:
+                continue
+
+            commit_hash = parts[0].strip()
+            author = parts[1].strip()
+            email = parts[2].strip()
+            timestamp = parts[3].strip()
+            message = parts[4].strip()  # Full message (may include newlines)
+
+            # Get branch info (current branch at the time of collection,
+            # since git doesn't record branch per-commit historically)
+            branch_result = subprocess.run(
+                ["git", "-C", str(repo_path), "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, timeout=5,
+            )
+            branch = branch_result.stdout.strip() if branch_result.returncode == 0 else "unknown"
+
+            entry = {
+                "hash": commit_hash,
+                "author": author,
+                "email": email,
+                "timestamp": timestamp,
+                "message": message,
+                "repo": repo_path.name,
+                "repo_path": str(repo_path.resolve()),
+                "branch": branch,
+                "hostname": os.uname().nodename,
+            }
+            commits.append(entry)
+            existing_hashes.add(commit_hash)
+
+        except (subprocess.TimeoutExpired, OSError):
+            continue
+
+        # Progress indicator for large batches
+        if (i + 1) % 50 == 0:
+            print(f"    ... {i + 1}/{len(new_hashes)}")
+
+    return commits
+
+
+def append_commits_to_files(commits: list[dict]) -> dict[str, int]:
+    """
+    Append commits to the appropriate weekly JSONL files (ISO week: YYYY-WXX).
+    Deduplicates by commit hash — commits already present in the target file
+    are skipped. Returns a dict mapping week_key -> count of new commits written.
+    """
+    counts: dict[str, int] = {}
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Group commits by week file
+    by_week: dict[str, list[dict]] = {}
+    for c in commits:
+        ts = c.get("timestamp", "")
+        if not ts:
+            continue
+        try:
+            dt = datetime.fromisoformat(ts)
+        except (ValueError, TypeError):
+            continue
+        iso_year, iso_week, _ = dt.isocalendar()
+        week_key = f"{iso_year}-W{iso_week:02d}"
+        by_week.setdefault(week_key, []).append(c)
+
+    # Write each week's commits, deduplicating against existing hashes in that file
+    for week_key, week_commits in by_week.items():
+        week_file = DATA_DIR / f"{week_key}.jsonl"
+
+        # Load existing hashes from this specific file
+        existing = load_existing_hashes(week_file)
+
+        new_count = 0
+        with open(week_file, "a", encoding="utf-8") as f:
+            for c in week_commits:
+                h = c.get("hash", "")
+                if not h or h in existing:
+                    continue
+                f.write(json.dumps(c, ensure_ascii=False) + "\n")
+                existing.add(h)
+                new_count += 1
+
+        if new_count > 0:
+            counts[week_key] = new_count
+
+    return counts
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Collect git commits by scanning directories for repositories.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s --scan ~/work                     # Scan ~/work for repos
+  %(prog)s --scan ~/projects --scan ~/work   # Multiple directories
+  %(prog)s --scan ~/work --since 2026-06-01  # Only recent commits
+  %(prog)s --scan ~/work --dry-run           # Preview without saving
+  %(prog)s --scan ~/work --max-depth 5       # Scan 5 levels deep
+        """.strip(),
+    )
+    parser.add_argument(
+        "--scan", "-s",
+        type=Path,
+        action="append",
+        required=True,
+        help="Directory to scan for git repos (can be specified multiple times)",
+    )
+    parser.add_argument(
+        "--since",
+        type=str,
+        default=None,
+        help="Only collect commits since this date (YYYY-MM-DD). Default: this week's Monday.",
+    )
+    parser.add_argument(
+        "--until",
+        type=str,
+        default=None,
+        help="Only collect commits until this date (YYYY-MM-DD)",
+    )
+    parser.add_argument(
+        "--max-depth", "-d",
+        type=int,
+        default=10,
+        help="Maximum directory depth to scan from each --scan root (default: 10)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Find repos and show commit counts without collecting anything",
+    )
+    parser.add_argument(
+        "--reset-state",
+        action="store_true",
+        help="Reset the last-sync state (re-collect all commits from scratch)",
+    )
+    parser.add_argument(
+        "--no-state",
+        action="store_true",
+        help="Don't use or update the sync state file (always use --since explicitly)",
+    )
+    parser.add_argument(
+        "--author", "-a",
+        type=str,
+        default=None,
+        help="Only collect commits by this author email (overrides default auto-detect)",
+    )
+    parser.add_argument(
+        "--all-authors",
+        action="store_true",
+        help="Collect commits from all authors (disable default --my-commits behavior)",
+    )
+
+    args = parser.parse_args()
+
+    # --- Step 1: Find all git repos ---
+    print("[*] Scanning for git repositories...")
+    all_repos: list[Path] = []
+    for scan_dir in args.scan:
+        scan_path = scan_dir.expanduser().resolve()
+        if not scan_path.is_dir():
+            print(f"[!] Not a directory: {scan_path}", file=sys.stderr)
+            continue
+        print(f"    Scanning: {scan_path}")
+        repos = find_git_repos(scan_path, args.max_depth)
+        all_repos.extend(repos)
+        print(f"      Found {len(repos)} repos")
+
+    # Deduplicate
+    all_repos = sorted(set(all_repos), key=lambda p: str(p))
+
+    if not all_repos:
+        print("\n[!] No git repositories found.")
+        sys.exit(1)
+
+    print(f"\n[*] Total repos found: {len(all_repos)}")
+
+    # --- Step 2: Determine date range, author filter, and sync state ---
+    state: dict = {} if args.no_state else load_state()
+
+    if args.reset_state:
+        print("[*] Resetting sync state — will re-collect all commits.")
+        state = {}
+
+    # Resolve author filter — defaults to current git user unless --all-authors
+    author_filter: Optional[str] = None
+    if args.author:
+        author_filter = args.author
+        print(f"[*] Only collecting commits by: {author_filter}")
+    elif not args.all_authors:
+        author_filter = get_git_user_email()
+        if author_filter:
+            print(f"[*] Only collecting commits by (current git user): {author_filter}")
+        else:
+            print("[!] Could not detect git user email. Use --all-authors to collect all, or --author to specify.", file=sys.stderr)
+            sys.exit(1)
+    # else: --all-authors → no filter, collect everything
+
+    # --- Step 3: Collect commits from each repo ---
+    all_new_commits: list[dict] = []
+    repo_stats: list[tuple[str, int, int]] = []  # (name, total, new)
+
+    for repo_path in all_repos:
+        print(f"\n  ▸ {repo_path.name} ({repo_path})")
+
+        # Determine effective --since for this repo
+        repo_key = str(repo_path.resolve())
+        effective_since = args.since
+
+        # Default: this week's Monday (if no explicit --since and not using state)
+        if not effective_since:
+            if not args.no_state:
+                # Use last-sync timestamp from state
+                last_sync = state.get(repo_key)
+                if last_sync:
+                    effective_since = last_sync
+            if not effective_since:
+                # Fallback: this week's Monday
+                today = datetime.now(timezone.utc)
+                monday = today - timedelta(days=today.weekday())
+                effective_since = monday.strftime("%Y-%m-%d")
+
+        total_count = get_commit_count(repo_path, effective_since, args.until, author_filter)
+        print(f"    Commits in range: {total_count}")
+
+        if args.dry_run:
+            repo_stats.append((repo_path.name, total_count, 0))
+            continue
+
+        if total_count == 0:
+            repo_stats.append((repo_path.name, 0, 0))
+            continue
+
+        # Load existing hashes (to deduplicate)
+        existing_hashes = load_all_existing_hashes()
+
+        # Collect
+        new_commits = collect_commits_from_repo(
+            repo_path,
+            since=effective_since,
+            until=args.until,
+            existing_hashes=existing_hashes,
+            author=author_filter,
+        )
+
+        if new_commits:
+            all_new_commits.extend(new_commits)
+
+        repo_stats.append((repo_path.name, total_count, len(new_commits)))
+
+        # Update state for this repo
+        if not args.no_state:
+            state[repo_key] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # --- Step 4: Save results ---
+    if args.dry_run:
+        print("\n" + "=" * 60)
+        print("  DRY RUN — No commits were saved")
+        print("=" * 60)
+        print(f"\n{'Repo':<40} {'Commits':>10}")
+        print("-" * 52)
+        total = 0
+        for name, count, _ in repo_stats:
+            print(f"{name:<40} {count:>10}")
+            total += count
+        print("-" * 52)
+        print(f"{'TOTAL':<40} {total:>10}")
+        return
+
+    if all_new_commits:
+        counts = append_commits_to_files(all_new_commits)
+        print(f"\n[✓] Collected {len(all_new_commits)} new commits:")
+        for week, count in sorted(counts.items()):
+            print(f"    data/commits/{week}.jsonl — {count} commits")
+    else:
+        print("\n[✓] No new commits to collect. Everything is up to date.")
+
+    # Save state
+    if not args.no_state:
+        save_state(state)
+
+    # --- Summary ---
+    print(f"\n{'Repo':<40} {'Total':>8} {'New':>8}")
+    print("-" * 58)
+    for name, total, new in repo_stats:
+        print(f"{name:<40} {total:>8} {new:>8}")
+
+
+if __name__ == "__main__":
+    main()

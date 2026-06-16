@@ -1,0 +1,504 @@
+#!/usr/bin/env python3
+"""
+git-report — Task Scheduler
+
+Manages scheduled tasks using macOS launchd (LaunchAgents).
+Supports adding, listing, removing, and showing scheduled tasks.
+
+Commands:
+    add      — Schedule a new recurring task
+    list     — List all git-report scheduled tasks
+    remove   — Remove a scheduled task
+    show     — Show details of a scheduled task
+
+Schedule Format:
+    Supports human-readable schedule expressions:
+      "Mon 09:00"         — Every Monday at 9am
+      "Fri 17:00"          — Every Friday at 5pm
+      "daily 08:00"        — Every day at 8am
+      "weekday 09:00"      — Monday through Friday at 9am
+      "Mon,Wed,Fri 14:00"  — Mon, Wed, Fri at 2pm
+      "1,15 10:00"         — 1st and 15th of each month at 10am
+
+Examples:
+    # Schedule weekly report every Friday at 5pm
+    ./scripts/schedule add --name weekly-report --schedule "Fri 17:00" \\
+        --command "python3 /path/to/generate-weekly-report"
+
+    # List all tasks
+    ./scripts/schedule list
+
+    # Remove a task
+    ./scripts/schedule remove --name weekly-report
+
+    # Show task details
+    ./scripts/schedule show --name weekly-report
+"""
+
+import argparse
+import os
+import plistlib
+import re
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+from typing import Optional
+from datetime import datetime
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = SCRIPT_DIR.parent
+LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
+LABEL_PREFIX = "com.git-report"
+
+# Day name to number mapping (Sunday=0 in Apple's calendar)
+DAY_MAP = {
+    "sun": 0, "sunday": 0,
+    "mon": 1, "monday": 1,
+    "tue": 2, "tuesday": 2,
+    "wed": 3, "wednesday": 3,
+    "thu": 4, "thursday": 4,
+    "fri": 5, "friday": 5,
+    "sat": 6, "saturday": 6,
+}
+
+
+# ---------------------------------------------------------------------------
+# Schedule parsing
+# ---------------------------------------------------------------------------
+
+def parse_schedule(schedule_str: str) -> dict:
+    """
+    Parse a human-readable schedule string into a StartCalendarInterval dict
+    suitable for launchd plist.
+
+    Returns a dict with keys that may include: Weekday, Day, Hour, Minute.
+    For multiple days, returns a list of dicts.
+    """
+    schedule_str = schedule_str.strip().lower()
+
+    # --- Time part: extract HH:MM ---
+    time_match = re.search(r"(\d{1,2}):(\d{2})\s*$", schedule_str)
+    if not time_match:
+        raise ValueError(f"Invalid time in schedule: {schedule_str!r}. Expected format like 'Fri 17:00'.")
+
+    hour = int(time_match.group(1))
+    minute = int(time_match.group(2))
+    day_part = schedule_str[:time_match.start()].strip().rstrip(",").strip()
+
+    if hour < 0 or hour > 23:
+        raise ValueError(f"Hour must be 0-23, got: {hour}")
+    if minute < 0 or minute > 59:
+        raise ValueError(f"Minute must be 0-59, got: {minute}")
+
+    # --- Day part: parse day spec ---
+    if not day_part or day_part in ("daily", "everyday", "every day"):
+        # No day constraint — runs every day
+        return {"Hour": hour, "Minute": minute}
+
+    if day_part in ("weekday", "weekdays", "week day"):
+        # Monday through Friday
+        return [
+            {"Weekday": 1, "Hour": hour, "Minute": minute},
+            {"Weekday": 2, "Hour": hour, "Minute": minute},
+            {"Weekday": 3, "Hour": hour, "Minute": minute},
+            {"Weekday": 4, "Hour": hour, "Minute": minute},
+            {"Weekday": 5, "Hour": hour, "Minute": minute},
+        ]
+
+    if day_part in ("weekend", "weekends"):
+        return [
+            {"Weekday": 0, "Hour": hour, "Minute": minute},
+            {"Weekday": 6, "Hour": hour, "Minute": minute},
+        ]
+
+    # Check for numeric days (1,15 for day-of-month)
+    if re.match(r"^[\d,\s]+$", day_part):
+        days_of_month = [int(d.strip()) for d in day_part.split(",") if d.strip().isdigit()]
+        if all(1 <= d <= 31 for d in days_of_month):
+            if len(days_of_month) == 1:
+                return {"Day": days_of_month[0], "Hour": hour, "Minute": minute}
+            else:
+                return [{"Day": d, "Hour": hour, "Minute": minute} for d in days_of_month]
+        raise ValueError(f"Invalid day-of-month values in: {day_part!r}")
+
+    # Check for day names: "Mon", "Mon,Wed,Fri", "Mon-Wed"
+    # Split by comma
+    parts = [p.strip() for p in day_part.split(",")]
+    weekdays = []
+    for p in parts:
+        # Check for range like "mon-wed"
+        if "-" in p:
+            start, end = p.split("-", 1)
+            start_num = DAY_MAP.get(start.strip())
+            end_num = DAY_MAP.get(end.strip())
+            if start_num is None or end_num is None:
+                raise ValueError(f"Invalid day name in range: {p!r}. Use Mon, Tue, Wed, Thu, Fri, Sat, Sun.")
+            if end_num >= start_num:
+                weekdays.extend(range(start_num, end_num + 1))
+            else:
+                # Wraparound: Fri-Mon
+                weekdays.extend(range(start_num, 7))
+                weekdays.extend(range(0, end_num + 1))
+        else:
+            day_num = DAY_MAP.get(p)
+            if day_num is None:
+                raise ValueError(f"Invalid day name: {p!r}. Use Mon, Tue, Wed, Thu, Fri, Sat, Sun.")
+            weekdays.append(day_num)
+
+    # Deduplicate and sort
+    weekdays = sorted(set(weekdays))
+
+    if len(weekdays) == 1:
+        return {"Weekday": weekdays[0], "Hour": hour, "Minute": minute}
+    else:
+        return [{"Weekday": d, "Hour": hour, "Minute": minute} for d in weekdays]
+
+
+def schedule_to_string(calendar_interval) -> str:
+    """Convert a launchd calendar interval to a human-readable string."""
+    if isinstance(calendar_interval, list):
+        if not calendar_interval:
+            return "(no schedule)"
+        # Try to produce a compact summary
+        entry = calendar_interval[0]
+    else:
+        entry = calendar_interval
+
+    hour = entry.get("Hour", 0)
+    minute = entry.get("Minute", 0)
+    weekday = entry.get("Weekday")
+    day = entry.get("Day")
+
+    time_str = f"{hour:02d}:{minute:02d}"
+
+    if weekday is not None:
+        if isinstance(calendar_interval, list):
+            days = sorted(set(e.get("Weekday") for e in calendar_interval))
+            rev_map = {v: k.title() for k, v in DAY_MAP.items() if len(k) == 3}
+            day_names = [rev_map.get(d, str(d)) for d in days]
+            return f"{','.join(day_names)} {time_str}"
+        else:
+            rev_map = {v: k.title() for k, v in DAY_MAP.items() if len(k) == 3}
+            return f"{rev_map.get(weekday, str(weekday))} {time_str}"
+    elif day is not None:
+        if isinstance(calendar_interval, list):
+            days = sorted(set(e.get("Day") for e in calendar_interval))
+            return f"Day {','.join(map(str, days))} {time_str}"
+        else:
+            return f"Day {day} {time_str}"
+    else:
+        return f"Daily {time_str}"
+
+
+# ---------------------------------------------------------------------------
+# Plist operations
+# ---------------------------------------------------------------------------
+
+def plist_path(name: str) -> Path:
+    """Get the plist file path for a task name."""
+    safe_name = re.sub(r"[^a-z0-9-]", "-", name.lower())
+    return LAUNCH_AGENTS_DIR / f"{LABEL_PREFIX}.{safe_name}.plist"
+
+
+def find_all_plists() -> list[Path]:
+    """Find all git-report plist files in LaunchAgents."""
+    if not LAUNCH_AGENTS_DIR.exists():
+        return []
+    return sorted(LAUNCH_AGENTS_DIR.glob(f"{LABEL_PREFIX}.*.plist"))
+
+
+def build_plist(name: str, command: str, schedule_str: str, api_key: Optional[str] = None) -> dict:
+    """Build a launchd plist dictionary."""
+    calendar_interval = parse_schedule(schedule_str)
+
+    # Split command into program + arguments
+    cmd_parts = command.strip().split()
+    if not cmd_parts:
+        raise ValueError("Command must not be empty")
+
+    # If the command is a Python script, make sure we invoke with python3
+    program = cmd_parts[0]
+    args = cmd_parts[1:] if len(cmd_parts) > 1 else []
+
+    if program.endswith(".py"):
+        args = [program] + args
+        program = sys.executable  # Use the same Python interpreter
+
+    safe_name = re.sub(r"[^a-z0-9-]", "-", name.lower())
+    label = f"{LABEL_PREFIX}.{safe_name}"
+    log_dir = PROJECT_DIR / "data" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    plist = {
+        "Label": label,
+        "ProgramArguments": [program] + args,
+        "StartCalendarInterval": calendar_interval,
+        "StandardOutPath": str(log_dir / f"{safe_name}.log"),
+        "StandardErrorPath": str(log_dir / f"{safe_name}.err"),
+        "RunAtLoad": False,
+    }
+
+    # Add environment variables
+    env = {}
+    if api_key:
+        env["OPENAI_API_KEY"] = api_key
+    # Pass through current PATH so the task can find python3 etc.
+    env["PATH"] = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+    env["HOME"] = os.environ.get("HOME", str(Path.home()))
+
+    if env:
+        plist["EnvironmentVariables"] = env
+
+    return plist
+
+
+# ---------------------------------------------------------------------------
+# launchctl wrappers
+# ---------------------------------------------------------------------------
+
+def launchctl_bootstrap(plist_path: Path) -> None:
+    """Load a launchd agent."""
+    result = subprocess.run(
+        ["launchctl", "bootstrap", "gui/501", str(plist_path)],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        # Try the newer launchctl syntax for macOS 13+
+        result2 = subprocess.run(
+            ["launchctl", "bootstrap", str(plist_path)],
+            capture_output=True, text=True
+        )
+        if result2.returncode != 0:
+            print(f"[!] Warning: Could not load agent: {result.stderr.strip() or result2.stderr.strip()}", file=sys.stderr)
+            print("[!] The task will be loaded on next login, or you can load it manually:", file=sys.stderr)
+            print(f"     launchctl bootstrap gui/$(id -u) {plist_path}", file=sys.stderr)
+
+
+def launchctl_bootout(name: str) -> None:
+    """Unload a launchd agent by label."""
+    safe_name = re.sub(r"[^a-z0-9-]", "-", name.lower())
+    label = f"{LABEL_PREFIX}.{safe_name}"
+
+    # Try with domain specification first, then without
+    result = subprocess.run(
+        ["launchctl", "bootout", f"gui/501/{label}"],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        subprocess.run(
+            ["launchctl", "bootout", label],
+            capture_output=True, text=True
+        )
+        # Ignore errors — the agent might not be loaded
+
+
+def launchctl_is_loaded(name: str) -> bool:
+    """Check if a launchd agent is currently loaded."""
+    safe_name = re.sub(r"[^a-z0-9-]", "-", name.lower())
+    label = f"{LABEL_PREFIX}.{safe_name}"
+    result = subprocess.run(
+        ["launchctl", "list"],
+        capture_output=True, text=True
+    )
+    return label in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+def cmd_add(args) -> None:
+    """Add a new scheduled task."""
+    plist_path_obj = plist_path(args.name)
+
+    if plist_path_obj.exists():
+        print(f"[!] Task {args.name!r} already exists. Use 'remove' first to replace it.", file=sys.stderr)
+        sys.exit(1)
+
+    # Build the plist
+    try:
+        plist = build_plist(args.name, args.command, args.schedule, args.api_key)
+    except ValueError as e:
+        print(f"[!] {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Write the plist
+    LAUNCH_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+    with open(plist_path_obj, "wb") as f:
+        plistlib.dump(plist, f)
+
+    print(f"[✓] Task created: {plist_path_obj}")
+    print(f"    Schedule: {schedule_to_string(plist.get('StartCalendarInterval', {}))}")
+    print(f"    Command: {args.command}")
+
+    # Load the agent
+    launchctl_bootstrap(plist_path_obj)
+    print(f"[✓] Task loaded and active.")
+
+
+def cmd_list(args) -> None:
+    """List all git-report scheduled tasks."""
+    plists = find_all_plists()
+
+    if not plists:
+        print("No git-report scheduled tasks found.")
+        print(f"\nTo add one: {sys.argv[0]} add --name <name> --schedule '<schedule>' --command '<cmd>'")
+        return
+
+    print(f"{'NAME':<25} {'SCHEDULE':<25} {'LOADED':<8} {'COMMAND'}")
+    print("-" * 100)
+
+    for pp in plists:
+        try:
+            with open(pp, "rb") as f:
+                plist = plistlib.load(f)
+        except Exception:
+            continue
+
+        safe_name = pp.stem.replace(f"{LABEL_PREFIX}.", "", 1)
+        label = plist.get("Label", pp.stem)
+        calendar = plist.get("StartCalendarInterval", {})
+        schedule_str = schedule_to_string(calendar)
+        command = " ".join(plist.get("ProgramArguments", ["?"]))
+        loaded = "✓" if launchctl_is_loaded(safe_name) else "—"
+
+        print(f"{safe_name:<25} {schedule_str:<25} {loaded:<8} {command}")
+
+
+def cmd_remove(args) -> None:
+    """Remove a scheduled task."""
+    pp = plist_path(args.name)
+
+    if not pp.exists():
+        print(f"[!] Task {args.name!r} not found.", file=sys.stderr)
+        sys.exit(1)
+
+    # Unload first
+    launchctl_bootout(args.name)
+    print(f"[*] Unloaded agent: {pp.stem}")
+
+    # Delete file
+    pp.unlink()
+    print(f"[✓] Task {args.name!r} removed.")
+
+
+def cmd_show(args) -> None:
+    """Show details of a scheduled task."""
+    pp = plist_path(args.name)
+
+    if not pp.exists():
+        print(f"[!] Task {args.name!r} not found.", file=sys.stderr)
+        sys.exit(1)
+
+    with open(pp, "rb") as f:
+        plist = plistlib.load(f)
+
+    safe_name = pp.stem.replace(f"{LABEL_PREFIX}.", "", 1)
+    calendar = plist.get("StartCalendarInterval", {})
+    command = " ".join(plist.get("ProgramArguments", ["?"]))
+    loaded = launchctl_is_loaded(safe_name)
+
+    print("═" * 60)
+    print(f"  Task: {safe_name}")
+    print("═" * 60)
+    print(f"  Label:      {plist.get('Label', 'N/A')}")
+    print(f"  Schedule:   {schedule_to_string(calendar)}")
+    print(f"  Loaded:     {'Yes' if loaded else 'No'}")
+    print(f"  Command:    {command}")
+    print(f"  Stdout log: {plist.get('StandardOutPath', 'N/A')}")
+    print(f"  Stderr log: {plist.get('StandardErrorPath', 'N/A')}")
+    print(f"  Plist file: {pp}")
+    env = plist.get("EnvironmentVariables", {})
+    if env:
+        print(f"  Env vars:   {', '.join(k for k in env if k != 'PATH' and k != 'HOME')}")
+    print("═" * 60)
+
+    # Show recent log output if available
+    stdout_log = plist.get("StandardOutPath")
+    if stdout_log and Path(stdout_log).exists():
+        print(f"\n  Recent log output ({stdout_log}):")
+        print("  " + "-" * 56)
+        try:
+            log_content = Path(stdout_log).read_text().strip()
+            if log_content:
+                # Show last 20 lines
+                lines = log_content.splitlines()[-20:]
+                for line in lines:
+                    print(f"  {line}")
+            else:
+                print("  (empty)")
+        except Exception:
+            print("  (could not read log)")
+        print("  " + "-" * 56)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Manage scheduled tasks for git-report using macOS launchd.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""\
+            Schedule examples:
+              "Mon 09:00"          Every Monday at 9am
+              "Fri 17:00"          Every Friday at 5pm
+              "Mon,Wed,Fri 14:00"  Mon, Wed, Fri at 2pm
+              "weekday 08:00"      Mon-Fri at 8am
+              "daily 08:00"        Every day at 8am
+
+            Examples:
+              %(prog)s add --name weekly --schedule "Fri 17:00" --command "python3 /path/to/gen-report"
+              %(prog)s list
+              %(prog)s remove --name weekly
+              %(prog)s show --name weekly
+        """),
+    )
+
+    subparsers = parser.add_subparsers(dest="command", help="Action to perform")
+
+    # --- add ---
+    add_parser = subparsers.add_parser("add", help="Add a scheduled task")
+    add_parser.add_argument("--name", "-n", required=True, help="Task name (e.g., 'weekly-report')")
+    add_parser.add_argument("--schedule", "-s", required=True, help="Schedule expression (e.g., 'Fri 17:00')")
+    add_parser.add_argument("--command", "-c", required=True, help="Command to run")
+    add_parser.add_argument("--api-key", "-k", default=None, help="OpenAI-compatible API key for environment (sets OPENAI_API_KEY)")
+
+    # --- list ---
+    subparsers.add_parser("list", aliases=["ls"], help="List all scheduled tasks")
+
+    # --- remove ---
+    remove_parser = subparsers.add_parser("remove", aliases=["rm", "delete"], help="Remove a scheduled task")
+    remove_parser.add_argument("--name", "-n", required=True, help="Task name to remove")
+
+    # --- show ---
+    show_parser = subparsers.add_parser("show", aliases=["info"], help="Show task details")
+    show_parser.add_argument("--name", "-n", required=True, help="Task name to show")
+
+    args = parser.parse_args()
+
+    if args.command is None:
+        parser.print_help()
+        sys.exit(1)
+
+    if args.command == "add":
+        cmd_add(args)
+    elif args.command in ("list", "ls"):
+        cmd_list(args)
+    elif args.command in ("remove", "rm", "delete"):
+        cmd_remove(args)
+    elif args.command in ("show", "info"):
+        cmd_show(args)
+    else:
+        parser.print_help()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
