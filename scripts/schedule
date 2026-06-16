@@ -455,6 +455,36 @@ def cmd_list(args) -> None:
         print(f"{safe_name:<25} {schedule_str:<25} {loaded:<8} {command}")
 
 
+def cmd_clear(args) -> None:
+    """Clear all git-report scheduled tasks."""
+    plists = find_all_plists()
+
+    if not plists:
+        print("No scheduled tasks to clear.")
+        return
+
+    # Confirmation
+    names = [pp.stem.replace(f"{LABEL_PREFIX}.", "", 1) for pp in plists]
+    print(f"This will remove {len(plists)} task(s): {', '.join(names)}")
+    try:
+        confirm = input("Confirm? [y/N]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\n[!] Cancelled.")
+        sys.exit(1)
+
+    if confirm not in ("y", "yes"):
+        print("Cancelled.")
+        return
+
+    for pp in plists:
+        name = pp.stem.replace(f"{LABEL_PREFIX}.", "", 1)
+        launchctl_bootout(name)
+        pp.unlink()
+        print(f"  [✓] {name} removed")
+
+    print(f"[✓] All {len(plists)} task(s) cleared.")
+
+
 def cmd_remove(args) -> None:
     """Remove a scheduled task."""
     pp = plist_path(args.name)
@@ -570,6 +600,9 @@ def main() -> None:
     remove_parser = subparsers.add_parser("remove", aliases=["rm", "delete"], help="Remove a scheduled task")
     remove_parser.add_argument("--name", "-n", required=True, help="Task name to remove")
 
+    # --- clear ---
+    subparsers.add_parser("clear", help="Remove all scheduled tasks")
+
     # --- show ---
     show_parser = subparsers.add_parser("show", aliases=["info"], help="Show task details")
     show_parser.add_argument("--name", "-n", required=True, help="Task name to show")
@@ -586,6 +619,8 @@ def main() -> None:
         cmd_list(args)
     elif args.command in ("remove", "rm", "delete"):
         cmd_remove(args)
+    elif args.command == "clear":
+        cmd_clear(args)
     elif args.command in ("show", "info"):
         cmd_show(args)
     else:

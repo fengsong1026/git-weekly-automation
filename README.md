@@ -119,7 +119,8 @@ cp config.example.json config.json
 # 管理任务
 ./scripts/schedule list                        # 查看所有
 ./scripts/schedule show --name weekly-report    # 详情 + 日志
-./scripts/schedule remove --name weekly-report  # 删除
+./scripts/schedule remove --name weekly-report  # 删除单个
+./scripts/schedule clear                       # 清空全部
 ```
 
 ## 两种采集方式的配合
