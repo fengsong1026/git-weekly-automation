@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Runtime data — commit logs, sync state, task logs
+data/
+
+# Generated reports
+reports/
+
+# Virtual environment
+venv/
+.venv/
