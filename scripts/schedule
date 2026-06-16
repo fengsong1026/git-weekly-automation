@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-git-report — Task Scheduler
+git-weekly-automation — Task Scheduler
 
 Manages scheduled tasks using macOS launchd (LaunchAgents).
 Supports adding, listing, removing, and showing scheduled tasks.
@@ -55,7 +55,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
 CONFIG_FILE = PROJECT_DIR / "config.json"
 LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
-LABEL_PREFIX = "com.git-report"
+LABEL_PREFIX = "com.git-weekly-automation"
 
 # ---------------------------------------------------------------------------
 # Config loading

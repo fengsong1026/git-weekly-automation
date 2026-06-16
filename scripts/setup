@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# git-report setup script
+# git-weekly-automation setup script
 #
 # Performs one-time setup:
 #   1. Configures git to use this project's hooks globally
@@ -25,7 +25,7 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 echo "============================================"
-echo "  git-report — One-Time Setup"
+echo "  git-weekly-automation — One-Time Setup"
 echo "============================================"
 echo ""
 

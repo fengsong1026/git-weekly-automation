@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-git-report — Commit Collector (Directory Scanner)
+git-weekly-automation — Commit Collector (Directory Scanner)
 
 Scans one or more directories for git repositories (any subdirectory
 containing a .git folder), runs `git log` in each to fetch commit

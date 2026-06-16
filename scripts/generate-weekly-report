@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-git-report — AI-Powered Weekly Report Generator
+git-weekly-automation — AI-Powered Weekly Report Generator
 
 Reads commit logs from data/commits/, combines them with a weekly report
 template, and calls an OpenAI-compatible chat completions API to generate

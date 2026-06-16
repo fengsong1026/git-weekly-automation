@@ -21,7 +21,7 @@ git repos ─── scripts/collect-commits ──┘         (batch/historical)
 - **Hook** (`hooks/post-commit`): Bash, runs via `git config --global core.hooksPath`. Captures commit metadata with `git log -1 --format=...`, writes one JSON line per commit. Fallback to Python if `jq` is unavailable. Deduplicates by hash via `grep` before writing.
 - **Collector** (`scripts/collect-commits`): Python, no external deps. Walks directory trees finding `.git` dirs (regular repos) AND `.git` files (submodules). Runs `git log --author=<email>` for filtering at the git level. Uses a state file (`data/collect-state.json`) to track last-sync per repo.
 - **Reporter** (`scripts/generate-weekly-report`): Python, no required deps. Reads weekly JSONL, groups by repo, sends to LLM via OpenAI-compatible `/v1/chat/completions`. Tries `openai` SDK first, falls back to `urllib`.
-- **Scheduler** (`scripts/schedule`): Python, manages macOS `~/Library/LaunchAgents/com.git-report.*.plist` files via `launchctl bootstrap`/`bootout`.
+- **Scheduler** (`scripts/schedule`): Python, manages macOS `~/Library/LaunchAgents/com.git-weekly-automation.*.plist` files via `launchctl bootstrap`/`bootout`.
 
 ## Data format
 

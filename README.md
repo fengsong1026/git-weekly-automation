@@ -1,4 +1,4 @@
-# git-report
+# git-weekly-automation
 
 > 自动收集 Git 提交记录 → AI 生成中文周报 → 定时自动执行
 
@@ -14,7 +14,7 @@
 ## 项目结构
 
 ```
-git-report/
+git-weekly-automation/
 ├── hooks/
 │   └── post-commit              # 全局 Git 钩子脚本 (bash)
 ├── data/
@@ -38,7 +38,7 @@ git-report/
 ### 1. 安装全局 Git Hook
 
 ```bash
-cd ~/development/lifecycle/git-report
+cd <path-to-project>
 ./scripts/setup
 ```
 
@@ -143,7 +143,7 @@ cp config.example.json config.json
   "timestamp": "2026-06-15T14:30:00+08:00",
   "message": "feat: add user authentication module",
   "repo": "my-project",
-  "repo_path": "/Users/dabo/work/my-project",
+  "repo_path": "/path/to/my-project",
   "branch": "feature/auth",
   "hostname": "MacBook-Pro.local"
 }

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ============================================================================
-# git-report global post-commit hook
+# git-weekly-automation global post-commit hook
 #
 # Captures commit metadata after every successful `git commit` and appends
 # it as a JSON line to a weekly log file in:
-#   ~/development/lifecycle/git-report/data/commits/
+#   <this-project>/data/commits/
 #
 # This hook is intended to be set globally via:
 #   git config --global core.hooksPath "<path-to-this-project>/hooks"
