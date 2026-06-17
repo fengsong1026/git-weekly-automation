@@ -40,12 +40,16 @@ import json
 import os
 import plistlib
 import re
+import shlex
 import subprocess
 import sys
 import textwrap
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
+
+# Import central registry module from sibling scripts
+from registry import register_task, unregister_task, clear_tasks
 
 
 # ---------------------------------------------------------------------------
@@ -256,12 +260,28 @@ def build_plist(name: str, command: str, schedule_str: str, api_key: Optional[st
 
     safe_name = re.sub(r"[^a-z0-9-]", "-", name.lower())
     label = f"{LABEL_PREFIX}.{safe_name}"
+    plist_file = plist_path(name)
     log_dir = PROJECT_DIR / "data" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    # Build the full command string for the shell wrapper
+    full_command = shlex.join([program] + args)
+
+    # Wrap the command in a self-checking shell script:
+    # - If PROJECT_DIR exists: cd into it and execute the real command
+    # - If PROJECT_DIR is gone: self-destruct (delete plist, unload from launchd)
+    wrapper_script = (
+        f'if [ -d "$PROJECT_DIR" ]; then '
+        f'cd "$PROJECT_DIR" && exec {full_command}; '
+        f'else '
+        f'rm -f "$PLIST_PATH" 2>/dev/null; '
+        f'launchctl bootout "gui/$(id -u)/$LAUNCHD_LABEL" 2>/dev/null || true; '
+        f'fi'
+    )
+
     plist = {
         "Label": label,
-        "ProgramArguments": [program] + args,
+        "ProgramArguments": ["/bin/sh", "-c", wrapper_script],
         "StartCalendarInterval": calendar_interval,
         "StandardOutPath": str(log_dir / f"{safe_name}.log"),
         "StandardErrorPath": str(log_dir / f"{safe_name}.err"),
@@ -269,15 +289,17 @@ def build_plist(name: str, command: str, schedule_str: str, api_key: Optional[st
     }
 
     # Add environment variables
-    env = {}
+    env = {
+        "PROJECT_DIR": str(PROJECT_DIR),
+        "PLIST_PATH": str(plist_file),
+        "LAUNCHD_LABEL": label,
+    }
     if api_key:
         env["OPENAI_API_KEY"] = api_key
     # Pass through current PATH so the task can find python3 etc.
     env["PATH"] = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
     env["HOME"] = os.environ.get("HOME", str(Path.home()))
-
-    if env:
-        plist["EnvironmentVariables"] = env
+    plist["EnvironmentVariables"] = env
 
     return plist
 
@@ -405,6 +427,19 @@ def cmd_add(args) -> None:
     launchctl_bootstrap(plist_path_obj)
     print(f"[✓] Task loaded. Next run: {schedule_desc}")
 
+    # Register in central registry
+    try:
+        register_task(
+            project_path=str(PROJECT_DIR),
+            task_name=name,
+            label=label,
+            plist_path=str(plist_path_obj),
+            schedule=schedule_str,
+            command=command,
+        )
+    except Exception:
+        pass  # Non-fatal: registry may not be writable
+
     # Offer to run once immediately for verification
     print()
     try:
@@ -463,18 +498,21 @@ def cmd_clear(args) -> None:
         print("No scheduled tasks to clear.")
         return
 
-    # Confirmation
-    names = [pp.stem.replace(f"{LABEL_PREFIX}.", "", 1) for pp in plists]
-    print(f"This will remove {len(plists)} task(s): {', '.join(names)}")
-    try:
-        confirm = input("Confirm? [y/N]: ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print("\n[!] Cancelled.")
-        sys.exit(1)
+    # Confirmation (skip if --yes)
+    if getattr(args, 'yes', False):
+        print(f"Removing {len(plists)} task(s) (--yes)...")
+    else:
+        names = [pp.stem.replace(f"{LABEL_PREFIX}.", "", 1) for pp in plists]
+        print(f"This will remove {len(plists)} task(s): {', '.join(names)}")
+        try:
+            confirm = input("Confirm? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n[!] Cancelled.")
+            sys.exit(1)
 
-    if confirm not in ("y", "yes"):
-        print("Cancelled.")
-        return
+        if confirm not in ("y", "yes"):
+            print("Cancelled.")
+            return
 
     for pp in plists:
         name = pp.stem.replace(f"{LABEL_PREFIX}.", "", 1)
@@ -483,6 +521,12 @@ def cmd_clear(args) -> None:
         print(f"  [✓] {name} removed")
 
     print(f"[✓] All {len(plists)} task(s) cleared.")
+
+    # Clear from central registry
+    try:
+        clear_tasks(str(PROJECT_DIR))
+    except Exception:
+        pass
 
 
 def cmd_remove(args) -> None:
@@ -500,6 +544,12 @@ def cmd_remove(args) -> None:
     # Delete file
     pp.unlink()
     print(f"[✓] Task {args.name!r} removed.")
+
+    # Unregister from central registry
+    try:
+        unregister_task(str(PROJECT_DIR), args.name)
+    except Exception:
+        pass
 
 
 def cmd_show(args) -> None:
@@ -601,7 +651,8 @@ def main() -> None:
     remove_parser.add_argument("--name", "-n", required=True, help="Task name to remove")
 
     # --- clear ---
-    subparsers.add_parser("clear", help="Remove all scheduled tasks")
+    clear_parser = subparsers.add_parser("clear", help="Remove all scheduled tasks")
+    clear_parser.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompt")
 
     # --- show ---
     show_parser = subparsers.add_parser("show", aliases=["info"], help="Show task details")

@@ -1,0 +1,35 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Claude Code
+.claude/
+CLAUDE.md
+
+# Generated data (not shipped with package)
+data/
+reports/
+logs/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+*.plist
+
+# Config (use config.json.example instead)
+config.json
+
+# Development
+*.tmp
+*.swp
+*.swo
+*~
+
+# Tests (if any added later)
+tests/
+test/

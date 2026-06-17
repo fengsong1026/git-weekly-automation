@@ -16,8 +16,14 @@ set -euo pipefail
 
 # Determine the data directory (relative to this project)
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(cd "$HOOK_DIR/.." && pwd)"
+PROJECT_DIR="$(cd "$HOOK_DIR/.." 2>/dev/null && pwd || echo "")"
 DATA_DIR="$PROJECT_DIR/data/commits"
+
+# Guard: if the project directory has been deleted, silently exit.
+# (The git hooksPath may still point here; this prevents spurious errors.)
+if [ -z "$PROJECT_DIR" ] || [ ! -d "$PROJECT_DIR" ]; then
+    exit 0
+fi
 
 # Ensure the data directory exists
 mkdir -p "$DATA_DIR"

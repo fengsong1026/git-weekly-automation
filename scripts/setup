@@ -21,6 +21,14 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 ACTION="${1:-install}"
+YES_FLAG=false
+if [ "$ACTION" = "--yes" ] || [ "$ACTION" = "-y" ]; then
+    YES_FLAG=true
+    ACTION="${2:-uninstall}"
+fi
+if [ "${2:-}" = "--yes" ] || [ "${2:-}" = "-y" ]; then
+    YES_FLAG=true
+fi
 
 # ======================================================================
 # Uninstall
@@ -31,60 +39,137 @@ if [ "$ACTION" = "uninstall" ]; then
     echo "============================================"
     echo ""
 
-    # --- 1. Remove git hook ---
-    CURRENT_HOOKS_PATH="$(git config --global core.hooksPath 2>/dev/null || echo "")"
-    echo "[1/3] Git global hook..."
-    if [ "$CURRENT_HOOKS_PATH" = "$HOOKS_PATH_ABS" ]; then
-        git config --global --unset core.hooksPath
-        echo -e "      ${GREEN}Removed.${NC} Git restored to default."
-    elif [ -z "$CURRENT_HOOKS_PATH" ]; then
-        echo "       No hook configured. Skipped."
-    else
-        echo -e "      ${YELLOW}HooksPath is $CURRENT_HOOKS_PATH — not ours. Skipped.${NC}"
+    if [ "$YES_FLAG" = true ]; then
+        echo "[*] Non-interactive mode (--yes)"
+        echo ""
     fi
 
-    # --- 2. Clear scheduled tasks ---
-    echo "[2/3] Scheduled tasks..."
-    PLIST_COUNT=$(ls "$HOME/Library/LaunchAgents/com.git-weekly-automation."*.plist 2>/dev/null | wc -l | tr -d ' ')
-    if [ "$PLIST_COUNT" -gt 0 ] 2>/dev/null; then
-        for plist in "$HOME/Library/LaunchAgents/com.git-weekly-automation."*.plist; do
-            [ -f "$plist" ] || continue
-            label="com.git-weekly-automation.$(basename "$plist" .plist | sed 's/com.git-weekly-automation.//')"
-            launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || launchctl bootout "$label" 2>/dev/null || true
-            rm -f "$plist"
-        done
-        echo -e "      ${GREEN}Removed $PLIST_COUNT task(s).${NC}"
+    # --- Read registry for authoritative artifact list ---
+    REGISTRY_DATA=$(python3 -c "
+import sys; sys.path.insert(0, '$SCRIPT_DIR')
+from registry import load_registry
+import json
+reg = load_registry()
+entry = reg.get('installations', {}).get('$PROJECT_DIR', {})
+print(json.dumps({
+    'found': bool(entry),
+    'hooks_path_set': entry.get('hooks_path_set', False),
+    'original_hooks_path': entry.get('original_hooks_path'),
+    'tasks': entry.get('scheduled_tasks', {}),
+}, ensure_ascii=False))
+" 2>/dev/null || echo '{"found":false,"hooks_path_set":false,"tasks":{}}')
+
+    FOUND=$(echo "$REGISTRY_DATA" | python3 -c "import json,sys; print(json.load(sys.stdin)['found'])")
+    HOOKS_SET=$(echo "$REGISTRY_DATA" | python3 -c "import json,sys; print(json.load(sys.stdin)['hooks_path_set'])")
+    ORIG_HOOKS=$(echo "$REGISTRY_DATA" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('original_hooks_path') or '')")
+    TASK_JSON=$(echo "$REGISTRY_DATA" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['tasks']))")
+
+    # --- 1. Remove git hook ---
+    echo "[1/4] Git global hook..."
+    if [ -n "$ORIG_HOOKS" ]; then
+        git config --global core.hooksPath "$ORIG_HOOKS" 2>/dev/null || git config --global --unset core.hooksPath 2>/dev/null || true
+        echo -e "      ${GREEN}Restored.${NC} hooksPath → $ORIG_HOOKS"
     else
-        echo "       No tasks found. Skipped."
+        CURRENT_HOOKS_PATH="$(git config --global core.hooksPath 2>/dev/null || echo "")"
+        if [ "$CURRENT_HOOKS_PATH" = "$HOOKS_PATH_ABS" ]; then
+            git config --global --unset core.hooksPath
+            echo -e "      ${GREEN}Removed.${NC} Git restored to default."
+        elif [ -z "$CURRENT_HOOKS_PATH" ]; then
+            echo "       No hook configured. Skipped."
+        else
+            echo -e "      ${YELLOW}HooksPath is $CURRENT_HOOKS_PATH — not ours. Skipped.${NC}"
+        fi
+    fi
+
+    # --- 2. Clear scheduled tasks (registry-aware) ---
+    echo "[2/4] Scheduled tasks..."
+    TASK_COUNT=$(echo "$TASK_JSON" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
+    if [ "$TASK_COUNT" -gt 0 ]; then
+        echo "$TASK_JSON" | python3 -c "
+import json, sys, os, subprocess
+tasks = json.load(sys.stdin)
+for name, info in tasks.items():
+    label = info.get('label', '')
+    plist = info.get('plist', '')
+    if label:
+        subprocess.run(['launchctl', 'bootout', f'gui/{os.getuid()}/{label}'],
+                       capture_output=True)
+        subprocess.run(['launchctl', 'bootout', label], capture_output=True)
+    if plist and os.path.exists(plist):
+        os.remove(plist)
+    print(f'      [✓] {name} — unloaded and removed')
+"
+        echo -e "      ${GREEN}Removed $TASK_COUNT task(s).${NC}"
+    else
+        # Fallback: scan filesystem for plist files
+        PLIST_COUNT=$(ls "$HOME/Library/LaunchAgents/com.git-weekly-automation."*.plist 2>/dev/null | wc -l | tr -d ' ')
+        if [ "$PLIST_COUNT" -gt 0 ] 2>/dev/null; then
+            for plist in "$HOME/Library/LaunchAgents/com.git-weekly-automation."*.plist; do
+                [ -f "$plist" ] || continue
+                label="com.git-weekly-automation.$(basename "$plist" .plist | sed 's/com.git-weekly-automation.//')"
+                launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || launchctl bootout "$label" 2>/dev/null || true
+                rm -f "$plist"
+            done
+            echo -e "      ${GREEN}Removed $PLIST_COUNT task(s) (filesystem scan).${NC}"
+        else
+            echo "       No tasks found. Skipped."
+        fi
     fi
 
     # --- 3. Remove data ---
-    echo "[3/3] Data files..."
+    echo "[3/4] Data files..."
     if [ -d "$PROJECT_DIR/data" ] && [ "$(ls -A "$PROJECT_DIR/data" 2>/dev/null)" ]; then
-        read -p "      Remove commit logs and state files? [y/N]: " -r CONFIRM
-        if [ "$CONFIRM" = "y" ] || [ "$CONFIRM" = "Y" ]; then
+        if [ "$YES_FLAG" = true ]; then
             rm -rf "$PROJECT_DIR/data"
             echo -e "      ${GREEN}Removed.${NC}"
         else
-            echo "       Skipped."
+            read -p "      Remove commit logs and state files? [y/N]: " -r CONFIRM
+            if [ "$CONFIRM" = "y" ] || [ "$CONFIRM" = "Y" ]; then
+                rm -rf "$PROJECT_DIR/data"
+                echo -e "      ${GREEN}Removed.${NC}"
+            else
+                echo "       Skipped."
+            fi
         fi
     else
         echo "       No data files. Skipped."
     fi
     # Also remove reports if exists
     if [ -d "$PROJECT_DIR/reports" ] && [ "$(ls -A "$PROJECT_DIR/reports" 2>/dev/null)" ]; then
-        read -p "      Remove generated reports? [y/N]: " -r CONFIRM
-        if [ "$CONFIRM" = "y" ] || [ "$CONFIRM" = "Y" ]; then
+        if [ "$YES_FLAG" = true ]; then
             rm -rf "$PROJECT_DIR/reports"
-            echo -e "      ${GREEN}Removed.${NC}"
+            echo -e "      ${GREEN}Removed reports.${NC}"
         else
-            echo "       Skipped."
+            read -p "      Remove generated reports? [y/N]: " -r CONFIRM
+            if [ "$CONFIRM" = "y" ] || [ "$CONFIRM" = "Y" ]; then
+                rm -rf "$PROJECT_DIR/reports"
+                echo -e "      ${GREEN}Removed.${NC}"
+            else
+                echo "       Skipped."
+            fi
         fi
     fi
 
+    # --- 4. Unregister from central registry ---
+    echo "[4/4] Central registry..."
+    python3 -c "
+import sys; sys.path.insert(0, '$SCRIPT_DIR')
+from registry import unregister_installation
+unregister_installation('$PROJECT_DIR')
+" 2>/dev/null || true
+    echo -e "      ${GREEN}Unregistered.${NC}"
+
     echo ""
     echo -e "${GREEN}Uninstall complete.${NC}"
-    echo "You can now delete the project directory: rm -rf $PROJECT_DIR"
+    echo ""
+    echo "All artifacts have been removed:"
+    echo "  • Git global hooksPath restored"
+    echo "  • Scheduled tasks unloaded and removed"
+    echo "  • Data files handled per your choice"
+    echo "  • Central registry entry removed"
+    echo ""
+    echo "You can now safely delete the project directory:"
+    echo "  rm -rf $PROJECT_DIR"
     exit 0
 fi
 
@@ -140,6 +225,8 @@ echo -e "${GREEN}OK${NC}"
 
 # --- Step 4: Set global hooks path ---
 echo -n "[4/5] Configuring git global hooks path... "
+# Save original hooksPath for restoration on uninstall
+ORIGINAL_HOOKS_PATH="$(git config --global core.hooksPath 2>/dev/null || echo "")"
 git config --global core.hooksPath "$HOOKS_PATH_ABS"
 echo -e "${GREEN}OK${NC}"
 echo "        Hooks path: $HOOKS_PATH_ABS"
@@ -155,6 +242,31 @@ else
     echo "        Got:      $CURRENT_HOOKS_PATH"
     exit 1
 fi
+
+# --- Step 6: Register in central registry ---
+echo -n "[6/6] Registering in central registry... "
+INSTALL_METHOD="manual"
+if [ -n "${npm_package_name:-}" ]; then
+    INSTALL_METHOD="npm-global"
+elif [ -n "${npm_config_local_prefix:-}" ]; then
+    INSTALL_METHOD="npm-local"
+fi
+ORIGINAL_HOOKS_PATH_JSON="null"
+if [ -n "${ORIGINAL_HOOKS_PATH:-}" ]; then
+    ORIGINAL_HOOKS_PATH_JSON="\"$ORIGINAL_HOOKS_PATH\""
+fi
+python3 -c "
+import sys; sys.path.insert(0, '$SCRIPT_DIR')
+from registry import register_installation
+register_installation(
+    project_path='$PROJECT_DIR',
+    install_method='$INSTALL_METHOD',
+    hooks_path_set=True,
+    original_hooks_path=$ORIGINAL_HOOKS_PATH_JSON if '$ORIGINAL_HOOKS_PATH' != '' else None,
+)
+" 2>/dev/null || true
+echo -e "${GREEN}OK${NC}"
+echo "        Registry: ~/.git-weekly-automation/registry.json"
 
 # --- Summary ---
 echo ""

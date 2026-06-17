@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""
+git-weekly — Unified CLI entry point
+
+This is the main command installed by npm (via package.json "bin" field).
+It dispatches subcommands to the appropriate script in the scripts/ directory.
+
+Usage:
+    git-weekly setup                  Run setup (install global hook)
+    git-weekly report [opts]          Generate a weekly report
+    git-weekly collect [opts]         Collect commits from repos
+    git-weekly schedule <sub> [opts]  Manage scheduled tasks
+    git-weekly cleanup                Remove orphaned installations
+    git-weekly --help
+"""
+
+import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+# Auto-detect project directory relative to this script.
+# Works regardless of where npm installed the package.
+CLI_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = CLI_DIR.parent
+
+
+def _run_script(script_name: str, args: list) -> None:
+    """Execute a sibling script and forward exit code."""
+    script_path = CLI_DIR / script_name
+    if not script_path.is_file():
+        print(f"[!] Script not found: {script_path}", file=sys.stderr)
+        sys.exit(1)
+
+    # Detect the correct interpreter from the script's shebang line
+    with open(script_path, "r") as f:
+        shebang = f.readline().strip()
+    if shebang.startswith("#!") and "python" in shebang:
+        interpreter = sys.executable
+        cmd = [interpreter, str(script_path)] + args
+    elif shebang.startswith("#!") and "bash" in shebang:
+        cmd = ["/bin/bash", str(script_path)] + args
+    elif shebang.startswith("#!") and "sh" in shebang:
+        cmd = ["/bin/sh", str(script_path)] + args
+    else:
+        # Fallback: let the OS resolve via shebang by making executable
+        script_path.chmod(0o755)
+        cmd = [str(script_path)] + args
+
+    os.execv(cmd[0], cmd)
+
+
+def cmd_cleanup() -> None:
+    """Scan registry for orphaned installations and clean them up."""
+    # Import the registry module from our own scripts directory
+    sys.path.insert(0, str(CLI_DIR))
+    from registry import cleanup_orphans, load_registry
+
+    print("git-weekly — Central Registry Cleanup")
+    print("=" * 45)
+    print()
+
+    # Show current state
+    reg = load_registry()
+    installs = reg.get("installations", {})
+    if not installs:
+        print("No installations registered. Nothing to clean up.")
+        return
+
+    print(f"Registered installations: {len(installs)}")
+    for path, entry in installs.items():
+        status = "exists" if Path(path).is_dir() else "GONE (orphaned)"
+        print(f"  [{status}] {path}")
+
+    print()
+    cleaned = cleanup_orphans()
+
+    if cleaned:
+        print(f"Cleaned up {len(cleaned)} orphaned installation(s):")
+        for path in cleaned:
+            print(f"  • {path}")
+            print(f"    - launchd tasks unloaded")
+            print(f"    - plist files deleted")
+            print(f"    - registry entry removed")
+    else:
+        print("No orphaned installations found.")
+        print()
+        print("Tip: If you still have artifacts to clean up, use:")
+        print("  git-weekly setup uninstall")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="git-weekly",
+        description="Git commit logging and weekly report generation",
+    )
+    sub = parser.add_subparsers(dest="command", help="Available commands")
+
+    sub.add_parser("setup", help="Install/uninstall git hook and scheduler").add_argument(
+        "action", nargs="?", default="install", choices=["install", "uninstall"],
+        help="Action to perform (default: install)",
+    )
+
+    rep = sub.add_parser("report", help="Generate weekly report")
+    rep.add_argument("--week", type=int, help="ISO week number")
+    rep.add_argument("--dry-run", action="store_true", help="Preview without API call")
+    rep.add_argument("--output", "-o", help="Output file path")
+    rep.add_argument("--author", help="Filter by author email")
+    rep.add_argument("--api-key", help="API key override")
+    rep.add_argument("--api-base", help="API base URL override")
+    rep.add_argument("--model", help="Model name override")
+    rep.add_argument("--template", help="Custom template file")
+
+    col = sub.add_parser("collect", help="Collect commits from repositories")
+    col.add_argument("--scan", action="append", help="Directory to scan for repos")
+    col.add_argument("--since", help="Start date (YYYY-MM-DD)")
+    col.add_argument("--until", help="End date (YYYY-MM-DD)")
+    col.add_argument("--week", type=int, help="ISO week number")
+    col.add_argument("--author", help="Filter by author email")
+    col.add_argument("--all-authors", action="store_true", help="Include all authors")
+    col.add_argument("--max-depth", type=int, default=3, help="Max scan depth")
+    col.add_argument("--dry-run", action="store_true", help="Preview without saving")
+
+    sch = sub.add_parser("schedule", help="Manage scheduled tasks")
+    sch_sub = sch.add_subparsers(dest="schedule_cmd", help="Schedule actions")
+    sch_add = sch_sub.add_parser("add", help="Add a scheduled task")
+    sch_add.add_argument("--name", "-n", default="", help="Task name")
+    sch_add.add_argument("--schedule", "-s", default="", help="Schedule expression (e.g. 'Fri 18:00')")
+    sch_add.add_argument("--command", "-c", default="", dest="cmd", help="Command to run")
+    sch_sub.add_parser("list", aliases=["ls"], help="List scheduled tasks")
+    sch_rm = sch_sub.add_parser("remove", aliases=["rm", "delete"], help="Remove a task")
+    sch_rm.add_argument("--name", "-n", required=True, help="Task name")
+    sch_sub.add_parser("clear", help="Remove all tasks")
+    sch_show = sch_sub.add_parser("show", aliases=["info"], help="Show task details")
+    sch_show.add_argument("--name", "-n", required=True, help="Task name")
+
+    sub.add_parser("cleanup", help="Clean up orphaned installations from the central registry")
+
+    args, unknown = parser.parse_known_args()
+
+    if args.command is None:
+        parser.print_help()
+        sys.exit(1)
+
+    if args.command == "setup":
+        if args.action == "uninstall":
+            _run_script("setup", ["uninstall"])
+        else:
+            _run_script("setup", [])
+
+    elif args.command == "report":
+        _run_script("generate-weekly-report", unknown)
+
+    elif args.command == "collect":
+        _run_script("collect-commits", unknown)
+
+    elif args.command == "schedule":
+        # Forward to the schedule script
+        schedule_args = []
+        if args.schedule_cmd:
+            schedule_args.append(args.schedule_cmd)
+            if args.schedule_cmd == "add":
+                if args.name:
+                    schedule_args.extend(["--name", args.name])
+                if args.schedule:
+                    schedule_args.extend(["--schedule", args.schedule])
+                if args.cmd:
+                    schedule_args.extend(["--command", args.cmd])
+            elif args.schedule_cmd in ("remove", "rm", "delete"):
+                schedule_args.extend(["--name", args.name])
+            elif args.schedule_cmd in ("show", "info"):
+                schedule_args.extend(["--name", args.name])
+        _run_script("schedule", schedule_args + unknown)
+
+    elif args.command == "cleanup":
+        cmd_cleanup()
+
+    else:
+        parser.print_help()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

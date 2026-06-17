@@ -1,0 +1,37 @@
+{
+  "name": "git-weekly-automation",
+  "version": "1.0.0",
+  "description": "Git commit logging and AI-powered weekly work report generation (Chinese). Captures every local git commit into weekly JSONL files, then uses an LLM to generate structured weekly reports.",
+  "homepage": "https://github.com/fengsong1026/git-weekly-automation",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fengsong1026/git-weekly-automation.git"
+  },
+  "license": "MIT",
+  "author": "fengsong",
+  "keywords": [
+    "git",
+    "commit-log",
+    "weekly-report",
+    "llm",
+    "ai",
+    "productivity",
+    "launchd",
+    "macos"
+  ],
+  "bin": {
+    "git-weekly": "./scripts/cli"
+  },
+  "scripts": {
+    "postinstall": "node -e \"console.log('git-weekly-automation installed. Run: git-weekly setup')\"",
+    "preuninstall": "python3 scripts/setup uninstall --yes 2>/dev/null || true",
+    "test": "python3 -c \"import sys; sys.path.insert(0, 'scripts'); from registry import load_registry; print('registry OK')\""
+  },
+  "files": [
+    "scripts/",
+    "hooks/",
+    "templates/",
+    "config.json.example",
+    "README.md"
+  ]
+}
