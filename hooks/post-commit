@@ -46,8 +46,23 @@ HOSTNAME="$(hostname 2>/dev/null || echo "unknown")"
 
 # --- Dedup: skip if this commit hash already exists in this week's file ---
 WEEK_FILE="$DATA_DIR/$(date +%G-W%V).jsonl"
-if [ -f "$WEEK_FILE" ] && grep -q "\"hash\":\"$HASH\"" "$WEEK_FILE" 2>/dev/null; then
-    exit 0
+if [ -f "$WEEK_FILE" ]; then
+    # Use Python for precise hash matching (avoids grep false positives with
+    # overlapping hashes and scales better for large files)
+    if python3 -c "
+import json, sys
+target = sys.argv[1]
+with open(sys.argv[2], 'r') as f:
+    for line in f:
+        try:
+            if json.loads(line).get('hash') == target:
+                sys.exit(0)
+        except json.JSONDecodeError:
+            pass
+sys.exit(1)
+" "$HASH" "$WEEK_FILE" 2>/dev/null; then
+        exit 0
+    fi
 fi
 
 # Use jq to safely construct valid JSON with proper escaping

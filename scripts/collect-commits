@@ -41,31 +41,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Set
 
+# Shared utilities from sibling scripts
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from common import get_git_user_email
+
 # ---------------------------------------------------------------------------
 # Path resolution
 # ---------------------------------------------------------------------------
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
 DATA_DIR = PROJECT_DIR / "data" / "commits"
-STATE_FILE = PROJECT_DIR / "data" / "collect-state.json"
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def get_git_user_email() -> str:
-    """Auto-detect the current git user email from global config."""
-    try:
-        result = subprocess.run(
-            ["git", "config", "--global", "user.email"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except (subprocess.TimeoutExpired, OSError):
-        pass
-    return ""
-
 
 def _is_git_repo(path: Path) -> bool:
     """
@@ -146,8 +131,6 @@ def _find_submodules_only(root: Path, max_depth: int) -> list[Path]:
         pass
     return submodules
 
-    return sorted(set(repos))
-
 
 def load_existing_hashes(month_file: Path) -> Set[str]:
     """Load all commit hashes already present in a monthly JSONL file."""
@@ -179,22 +162,6 @@ def load_all_existing_hashes() -> Set[str]:
     for f in sorted(DATA_DIR.glob("*.jsonl")):
         all_hashes.update(load_existing_hashes(f))
     return all_hashes
-
-
-def load_state() -> dict:
-    """Load the collection state (last-sync timestamps per repo)."""
-    if STATE_FILE.exists():
-        try:
-            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return {}
-    return {}
-
-
-def save_state(state: dict) -> None:
-    """Save the collection state."""
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def get_commit_count(repo_path: Path, since: Optional[str] = None, until: Optional[str] = None, author: Optional[str] = None) -> int:
@@ -418,16 +385,6 @@ Examples:
         help="Find repos and show commit counts without collecting anything",
     )
     parser.add_argument(
-        "--reset-state",
-        action="store_true",
-        help="Reset the last-sync state (re-collect all commits from scratch)",
-    )
-    parser.add_argument(
-        "--no-state",
-        action="store_true",
-        help="Don't use or update the sync state file (always use --since explicitly)",
-    )
-    parser.add_argument(
         "--author", "-a",
         type=str,
         default=None,
@@ -463,13 +420,7 @@ Examples:
 
     print(f"\n[*] Total repos found: {len(all_repos)}")
 
-    # --- Step 2: Determine date range, author filter, and sync state ---
-    state: dict = {} if args.no_state else load_state()
-
-    if args.reset_state:
-        print("[*] Resetting sync state — will re-collect all commits.")
-        state = {}
-
+    # --- Step 2: Determine date range and author filter ---
     # Resolve author filter — defaults to current git user unless --all-authors
     author_filter: Optional[str] = None
     if args.author:
@@ -492,21 +443,12 @@ Examples:
         print(f"\n  ▸ {repo_path.name} ({repo_path})")
 
         # Determine effective --since for this repo
-        repo_key = str(repo_path.resolve())
         effective_since = args.since
-
-        # Default: this week's Monday (if no explicit --since and not using state)
         if not effective_since:
-            if not args.no_state:
-                # Use last-sync timestamp from state
-                last_sync = state.get(repo_key)
-                if last_sync:
-                    effective_since = last_sync
-            if not effective_since:
-                # Fallback: this week's Monday
-                today = datetime.now(timezone.utc)
-                monday = today - timedelta(days=today.weekday())
-                effective_since = monday.strftime("%Y-%m-%d")
+            # Default: this week's Monday
+            today = datetime.now(timezone.utc)
+            monday = today - timedelta(days=today.weekday())
+            effective_since = monday.strftime("%Y-%m-%d")
 
         total_count = get_commit_count(repo_path, effective_since, args.until, author_filter)
         print(f"    Commits in range: {total_count}")
@@ -536,10 +478,6 @@ Examples:
 
         repo_stats.append((repo_path.name, total_count, len(new_commits)))
 
-        # Update state for this repo
-        if not args.no_state:
-            state[repo_key] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
     # --- Step 4: Save results ---
     if args.dry_run:
         print("\n" + "=" * 60)
@@ -562,10 +500,6 @@ Examples:
             print(f"    data/commits/{week}.jsonl — {count} commits")
     else:
         print("\n[✓] No new commits to collect. Everything is up to date.")
-
-    # Save state
-    if not args.no_state:
-        save_state(state)
 
     # --- Summary ---
     print(f"\n{'Repo':<40} {'Total':>8} {'New':>8}")

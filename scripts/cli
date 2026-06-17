@@ -91,63 +91,49 @@ def cmd_cleanup() -> None:
 
 
 def main() -> None:
+    # Outer parser only routes commands — inner scripts handle their own flags.
+    # This avoids argument duplication and the bug where the outer parser
+    # consumes flags meant for inner scripts.
     parser = argparse.ArgumentParser(
         prog="git-weekly",
         description="Git commit logging and weekly report generation",
+        add_help=False,
     )
+    parser.add_argument("-h", "--help", action="store_true", help="Show this help and exit")
     sub = parser.add_subparsers(dest="command", help="Available commands")
 
-    sub.add_parser("setup", help="Install/uninstall git hook and scheduler").add_argument(
-        "action", nargs="?", default="install", choices=["install", "uninstall"],
-        help="Action to perform (default: install)",
-    )
+    sub.add_parser("setup", add_help=False, help="Install/uninstall git hook and scheduler")
+    sub.add_parser("report", add_help=False, help="Generate weekly report")
+    sub.add_parser("collect", add_help=False, help="Collect commits from repositories")
 
-    rep = sub.add_parser("report", help="Generate weekly report")
-    rep.add_argument("--week", type=int, help="ISO week number")
-    rep.add_argument("--dry-run", action="store_true", help="Preview without API call")
-    rep.add_argument("--output", "-o", help="Output file path")
-    rep.add_argument("--author", help="Filter by author email")
-    rep.add_argument("--api-key", help="API key override")
-    rep.add_argument("--api-base", help="API base URL override")
-    rep.add_argument("--model", help="Model name override")
-    rep.add_argument("--template", help="Custom template file")
-
-    col = sub.add_parser("collect", help="Collect commits from repositories")
-    col.add_argument("--scan", action="append", help="Directory to scan for repos")
-    col.add_argument("--since", help="Start date (YYYY-MM-DD)")
-    col.add_argument("--until", help="End date (YYYY-MM-DD)")
-    col.add_argument("--week", type=int, help="ISO week number")
-    col.add_argument("--author", help="Filter by author email")
-    col.add_argument("--all-authors", action="store_true", help="Include all authors")
-    col.add_argument("--max-depth", type=int, default=3, help="Max scan depth")
-    col.add_argument("--dry-run", action="store_true", help="Preview without saving")
-
-    sch = sub.add_parser("schedule", help="Manage scheduled tasks")
+    # Schedule subcommands are parsed here because we need to rebuild
+    # args from the namespace for correct forwarding
+    sch = sub.add_parser("schedule", add_help=False, help="Manage scheduled tasks")
     sch_sub = sch.add_subparsers(dest="schedule_cmd", help="Schedule actions")
-    sch_add = sch_sub.add_parser("add", help="Add a scheduled task")
+    sch_add = sch_sub.add_parser("add", add_help=False, help="Add a scheduled task")
     sch_add.add_argument("--name", "-n", default="", help="Task name")
     sch_add.add_argument("--schedule", "-s", default="", help="Schedule expression (e.g. 'Fri 18:00')")
     sch_add.add_argument("--command", "-c", default="", dest="cmd", help="Command to run")
-    sch_sub.add_parser("list", aliases=["ls"], help="List scheduled tasks")
-    sch_rm = sch_sub.add_parser("remove", aliases=["rm", "delete"], help="Remove a task")
+    sch_sub.add_parser("list", add_help=False, aliases=["ls"], help="List scheduled tasks")
+    sch_rm = sch_sub.add_parser("remove", add_help=False, aliases=["rm", "delete"], help="Remove a task")
     sch_rm.add_argument("--name", "-n", required=True, help="Task name")
-    sch_sub.add_parser("clear", help="Remove all tasks")
-    sch_show = sch_sub.add_parser("show", aliases=["info"], help="Show task details")
+    sch_cl = sch_sub.add_parser("clear", add_help=False, help="Remove all tasks")
+    sch_cl.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
+    sch_show = sch_sub.add_parser("show", add_help=False, aliases=["info"], help="Show task details")
     sch_show.add_argument("--name", "-n", required=True, help="Task name")
 
-    sub.add_parser("cleanup", help="Clean up orphaned installations from the central registry")
+    sub.add_parser("cleanup", add_help=False, help="Clean up orphaned installations from the central registry")
 
     args, unknown = parser.parse_known_args()
 
-    if args.command is None:
+    if args.help or args.command is None:
         parser.print_help()
-        sys.exit(1)
+        print()
+        print("Run 'git-weekly <command> --help' for per-command options.")
+        sys.exit(0 if args.help else 1)
 
     if args.command == "setup":
-        if args.action == "uninstall":
-            _run_script("setup", ["uninstall"])
-        else:
-            _run_script("setup", [])
+        _run_script("setup", unknown)
 
     elif args.command == "report":
         _run_script("generate-weekly-report", unknown)
@@ -156,7 +142,6 @@ def main() -> None:
         _run_script("collect-commits", unknown)
 
     elif args.command == "schedule":
-        # Forward to the schedule script
         schedule_args = []
         if args.schedule_cmd:
             schedule_args.append(args.schedule_cmd)
@@ -171,6 +156,9 @@ def main() -> None:
                 schedule_args.extend(["--name", args.name])
             elif args.schedule_cmd in ("show", "info"):
                 schedule_args.extend(["--name", args.name])
+            elif args.schedule_cmd == "clear":
+                if getattr(args, "yes", False):
+                    schedule_args.append("--yes")
         _run_script("schedule", schedule_args + unknown)
 
     elif args.command == "cleanup":

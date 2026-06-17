@@ -39,10 +39,15 @@ import json
 import os
 import subprocess
 import sys
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Union
+
+# Shared utilities from sibling scripts
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from common import load_config, get_git_user_email, validate_iso_week
 
 
 # ---------------------------------------------------------------------------
@@ -56,17 +61,10 @@ REPORTS_DIR = PROJECT_DIR / "reports"
 DEFAULT_TEMPLATE = PROJECT_DIR / "templates" / "weekly-report.md"
 
 # OpenAI-compatible API settings
-OPENAI_DEFAULT_BASE_URL = "https://api.deepseek.com"
-DEFAULT_MODEL = "deepseek-v4-flash"
+OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_MODEL = "gpt-4o-mini"
 
-def load_config() -> dict:
-    """Load project configuration from config.json."""
-    if CONFIG_FILE.exists():
-        try:
-            return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
-    return {}
+# load_config() imported from common.py
 MAX_COMMITS_FOR_PROMPT = 300  # Truncate if more commits than this
 
 
@@ -115,18 +113,7 @@ def format_date(dt: datetime) -> str:
 # Commit log reading
 # ---------------------------------------------------------------------------
 
-def get_git_user_email() -> str:
-    """Auto-detect the current git user email from global config."""
-    try:
-        result = subprocess.run(
-            ["git", "config", "--global", "user.email"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except (subprocess.TimeoutExpired, OSError):
-        pass
-    return ""
+# get_git_user_email() imported from common.py
 
 
 def read_commits(monday: datetime, sunday: datetime, author: Optional[str] = None) -> list[dict]:
@@ -365,17 +352,39 @@ def call_openai_compatible_api(
     }
 
     req = urllib.request.Request(api_url, data=payload, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-            return body["choices"][0]["message"]["content"]
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8") if e.fp else ""
-        raise RuntimeError(f"API error {e.code}: {error_body}") from e
-    except (KeyError, IndexError) as e:
-        raise RuntimeError(f"Unexpected API response format: {e}") from e
-    except Exception as e:
-        raise RuntimeError(f"API request failed: {e}") from e
+
+    # Retry with exponential backoff for transient errors
+    max_retries = 3
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+                return body["choices"][0]["message"]["content"]
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode("utf-8") if e.fp else ""
+            # 429 (rate limit) and 5xx are retryable
+            if e.code in (429, 500, 502, 503, 504) and attempt < max_retries:
+                wait = 2 ** attempt
+                print(f"[*] API returned {e.code}, retrying in {wait}s (attempt {attempt}/{max_retries})...",
+                      file=sys.stderr)
+                time.sleep(wait)
+                last_error = RuntimeError(f"API error {e.code}: {error_body}")
+                continue
+            raise RuntimeError(f"API error {e.code}: {error_body}") from e
+        except (urllib.error.URLError, OSError) as e:
+            if attempt < max_retries:
+                wait = 2 ** attempt
+                print(f"[*] Network error, retrying in {wait}s (attempt {attempt}/{max_retries})...",
+                      file=sys.stderr)
+                time.sleep(wait)
+                last_error = e
+                continue
+            raise RuntimeError(f"API request failed after {max_retries} attempts: {e}") from e
+        except (KeyError, IndexError) as e:
+            raise RuntimeError(f"Unexpected API response format: {e}") from e
+
+    raise RuntimeError(f"API request failed after {max_retries} attempts") from last_error
 
 
 # ---------------------------------------------------------------------------
@@ -492,7 +501,12 @@ Examples:
         or OPENAI_DEFAULT_BASE_URL
     )
 
+    # Resolve model: CLI flag > config.json > default
+    model = args.model or config.get("model") or DEFAULT_MODEL
+
     # --- Step 1: Determine date range ---
+    if args.week is not None:
+        validate_iso_week(args.week)
     monday, sunday, week_label = get_week_dates(args.week, args.year)
     date_range = f"{format_date(monday)} → {format_date(sunday)}"
     print(f"[*] Week: {week_label} ({date_range})")
@@ -563,17 +577,17 @@ Examples:
         return
 
     # --- Step 7: Call API ---
-    print(f"[*] Calling API (model: {args.model}, base: {api_base}) ...")
+    print(f"[*] Calling API (model: {model}, base: {api_base}) ...", end="", flush=True)
     try:
         report = call_openai_compatible_api(
             system_prompt=system_prompt,
             user_message=user_message,
             api_key=api_key,
-            model=args.model,
+            model=model,
             api_base_url=api_base,
             max_tokens=args.max_tokens,
         )
-        print(f"[*] Received response ({len(report)} chars)")
+        print(f" done ({len(report)} chars)")
     except Exception as e:
         print(f"\n[!] API call failed: {e}", file=sys.stderr)
         sys.exit(1)

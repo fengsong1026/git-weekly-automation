@@ -50,6 +50,25 @@ from datetime import datetime
 
 # Import central registry module from sibling scripts
 from registry import register_task, unregister_task, clear_tasks
+from common import load_config, resolve_api_key
+
+
+# ---------------------------------------------------------------------------
+# Platform check
+# ---------------------------------------------------------------------------
+
+def _check_platform() -> None:
+    """Exit with a helpful message if not running on macOS."""
+    if sys.platform != "darwin":
+        print("[!] Scheduled tasks are only supported on macOS (via launchd).", file=sys.stderr)
+        print("[!] On Linux, use cron or systemd timers to schedule reports manually:", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("    # Cron example: every Friday at 6pm", file=sys.stderr)
+        print("    0 18 * * 5 cd /path/to/project && python3 scripts/generate-weekly-report", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("    # systemd timer example:", file=sys.stderr)
+        print("    # See https://wiki.archlinux.org/title/Systemd/Timers", file=sys.stderr)
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -61,29 +80,7 @@ CONFIG_FILE = PROJECT_DIR / "config.json"
 LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
 LABEL_PREFIX = "com.git-weekly-automation"
 
-# ---------------------------------------------------------------------------
-# Config loading
-# ---------------------------------------------------------------------------
-
-def load_config() -> dict:
-    """Load project configuration from config.json."""
-    if CONFIG_FILE.exists():
-        try:
-            return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
-    return {}
-
-def resolve_api_key() -> Optional[str]:
-    """
-    Resolve API key with priority: env var > config file.
-    """
-    env_key = os.environ.get("OPENAI_API_KEY")
-    if env_key:
-        return env_key
-    config = load_config()
-    return config.get("api_key")
-
+# load_config() and resolve_api_key() imported from common.py
 # Day name to number mapping (Sunday=0 in Apple's calendar)
 DAY_MAP = {
     "sun": 0, "sunday": 0,
@@ -301,7 +298,7 @@ def build_plist(name: str, command: str, schedule_str: str, api_key: Optional[st
     env["HOME"] = os.environ.get("HOME", str(Path.home()))
     plist["EnvironmentVariables"] = env
 
-    return plist
+    return plist, label
 
 
 # ---------------------------------------------------------------------------
@@ -310,8 +307,9 @@ def build_plist(name: str, command: str, schedule_str: str, api_key: Optional[st
 
 def launchctl_bootstrap(plist_path: Path) -> None:
     """Load a launchd agent."""
+    uid = os.getuid()
     result = subprocess.run(
-        ["launchctl", "bootstrap", "gui/501", str(plist_path)],
+        ["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)],
         capture_output=True, text=True
     )
     if result.returncode != 0:
@@ -323,17 +321,18 @@ def launchctl_bootstrap(plist_path: Path) -> None:
         if result2.returncode != 0:
             print(f"[!] Warning: Could not load agent: {result.stderr.strip() or result2.stderr.strip()}", file=sys.stderr)
             print("[!] The task will be loaded on next login, or you can load it manually:", file=sys.stderr)
-            print(f"     launchctl bootstrap gui/$(id -u) {plist_path}", file=sys.stderr)
+            print(f"     launchctl bootstrap gui/{uid} {plist_path}", file=sys.stderr)
 
 
 def launchctl_bootout(name: str) -> None:
     """Unload a launchd agent by label."""
     safe_name = re.sub(r"[^a-z0-9-]", "-", name.lower())
     label = f"{LABEL_PREFIX}.{safe_name}"
+    uid = os.getuid()
 
     # Try with domain specification first, then without
     result = subprocess.run(
-        ["launchctl", "bootout", f"gui/501/{label}"],
+        ["launchctl", "bootout", f"gui/{uid}/{label}"],
         capture_output=True, text=True
     )
     if result.returncode != 0:
@@ -352,7 +351,12 @@ def launchctl_is_loaded(name: str) -> bool:
         ["launchctl", "list"],
         capture_output=True, text=True
     )
-    return label in result.stdout
+    # Use word-boundary matching to avoid false positives
+    # launchctl list outputs: PID\tStatus\tLabel
+    for line in result.stdout.splitlines():
+        if line.endswith(label) or f"\t{label}" in line:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -408,7 +412,7 @@ def cmd_add(args) -> None:
     # Build the plist (auto-resolve API key from env or config.json)
     api_key = resolve_api_key()
     try:
-        plist = build_plist(name, command, schedule_str, api_key)
+        plist, label = build_plist(name, command, schedule_str, api_key)
     except ValueError as e:
         print(f"[!] {e}", file=sys.stderr)
         sys.exit(1)
@@ -616,6 +620,7 @@ def cmd_show(args) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    _check_platform()
     parser = argparse.ArgumentParser(
         description="Manage scheduled tasks for git-report using macOS launchd.",
         formatter_class=argparse.RawDescriptionHelpFormatter,

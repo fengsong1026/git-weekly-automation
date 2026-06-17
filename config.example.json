@@ -1,4 +1,12 @@
 {
   "api_key": "sk-your-api-key-here",
-  "api_base": "https://api.deepseek.com"
+  "api_base": "https://api.openai.com/v1",
+  "model": "gpt-4o-mini",
+  "cleanup": {
+    "commits_weeks": 52,
+    "reports_weeks": 26,
+    "logs_days": 90,
+    "on_commit": false,
+    "on_report": true
+  }
 }

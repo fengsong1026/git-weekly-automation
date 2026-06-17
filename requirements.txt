@@ -1,10 +1,9 @@
-# git-weekly-automation Python dependencies
+# git-weekly-automation — No pip dependencies required.
 #
-# Install with: pip install -r requirements.txt
-
-# openai Python SDK (optional — the report generator falls back to stdlib urllib)
-# Uncomment if you want to use the SDK instead of the HTTP fallback:
-# openai>=1.0.0
-
-# Note: All other dependencies are from the Python standard library:
-#   json, argparse, datetime, pathlib, collections, plistlib, subprocess, urllib
+# All scripts use only the Python 3.8+ standard library:
+#   json, argparse, datetime, pathlib, subprocess, urllib, plistlib, fcntl
+#
+# Optional: install the openai SDK for better API error handling and retry logic.
+# The script falls back to stdlib urllib if the SDK is not available.
+#
+#   pip install openai>=1.0.0

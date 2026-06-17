@@ -11,9 +11,10 @@ npm install -g git-weekly-automation
 # 2. 初始化
 git-weekly setup
 
-# 3. 配置 API Key（选一个）
+# 3. 配置 API Key
 export OPENAI_API_KEY="sk-your-key-here"
-export OPENAI_BASE_URL="https://api.deepseek.com/v1"   # 可选，默认 OpenAI
+# 如果用 DeepSeek 等第三方 API，还需指定地址：
+# export OPENAI_BASE_URL="https://api.deepseek.com/v1"
 
 # 4. 立即试试
 git-weekly report
@@ -25,14 +26,16 @@ git-weekly report
 
 ## 常用命令
 
-| 命令 | 说明 |
-|------|------|
-| `git-weekly setup` | 安装全局 git hook |
-| `git-weekly report` | 生成本周周报 |
+
+| 命令                                 | 说明            |
+| ---------------------------------- | ------------- |
+| `git-weekly setup`                 | 安装全局 git hook |
+| `git-weekly report`                | 生成本周周报        |
 | `git-weekly collect --scan ~/work` | 从现有仓库批量采集历史提交 |
-| `git-weekly schedule add` | 添加定时任务（交互式引导） |
-| `git-weekly schedule list` | 查看所有定时任务 |
-| `git-weekly cleanup` | 清理残留的孤儿安装 |
+| `git-weekly schedule add`          | 添加定时任务（交互式引导） |
+| `git-weekly schedule list`         | 查看所有定时任务      |
+| `git-weekly cleanup`               | 清理残留的孤儿安装     |
+
 
 ## 命令详解
 
@@ -72,7 +75,6 @@ git-weekly collect --scan ~/work                    # 扫描单个目录
 git-weekly collect --scan ~/work --scan ~/projects  # 扫描多个
 git-weekly collect --scan ~/work --since 2026-01-01 # 指定起始日期
 git-weekly collect --scan ~/work --dry-run           # 预览不写入
-git-weekly collect --scan ~/work --reset-state       # 重新全量采集
 ```
 
 ### git-weekly schedule
@@ -89,13 +91,15 @@ git-weekly schedule clear   # 清空全部
 
 **Schedule 表达式：**
 
-| 表达式 | 含义 |
-|--------|------|
-| `Fri 18:00` | 每周五下午 6 点 |
-| `Mon 09:00` | 每周一早上 9 点 |
+
+| 表达式                 | 含义           |
+| ------------------- | ------------ |
+| `Fri 18:00`         | 每周五下午 6 点    |
+| `Mon 09:00`         | 每周一早上 9 点    |
 | `Mon,Wed,Fri 14:00` | 周一、三、五下午 2 点 |
-| `weekday 08:00` | 周一至周五早上 8 点 |
-| `daily 08:00` | 每天早上 8 点 |
+| `weekday 08:00`     | 周一至周五早上 8 点  |
+| `daily 08:00`       | 每天早上 8 点     |
+
 
 ### git-weekly cleanup
 
@@ -116,8 +120,7 @@ data/
 ├── commits/
 │   ├── 2026-W25.jsonl      # 每周提交记录（JSONL）
 │   └── ...
-├── logs/                   # 定时任务运行日志
-└── collect-state.json      # 采集器同步状态
+└── logs/                   # 定时任务运行日志
 
 reports/                    # 生成的周报（.md）
 ```
@@ -132,18 +135,24 @@ reports/                    # 生成的周报（.md）
 
 ## API 配置
 
-三种方式，优先级从高到低：
+四种方式，优先级从高到低：
 
 ```bash
-# 1. 环境变量（推荐，与安装方式无关）
+# 1. 命令行参数（最高优先级）
+git-weekly report --api-base https://api.deepseek.com/v1 --model deepseek-chat
+
+# 2. 环境变量
 export OPENAI_API_KEY="sk-..."
-export OPENAI_BASE_URL="https://api.deepseek.com/v1"   # 可选
+export OPENAI_BASE_URL="https://api.deepseek.com/v1"
 
-# 2. 项目根目录 config.json
-echo '{"api_key":"sk-...","api_base":"https://api.deepseek.com/v1"}' > config.json
+# 3. 项目根目录 config.json（复制 config.example.json 后修改）
+cp config.example.json config.json
+# 编辑 config.json：
+#   "api_key":  API 密钥
+#   "api_base": API 地址（可选，默认 api.openai.com/v1）
+#   "model":    模型名（可选，默认 gpt-4o-mini）
 
-# 3. 命令行参数
-git-weekly report --api-base https://api.deepseek.com/v1
+# 4. 什么都不配 → 走 dry-run 模式预览 prompt
 ```
 
 支持任何 OpenAI 兼容 API：OpenAI、DeepSeek、vLLM、Ollama、LiteLLM 等。
@@ -154,14 +163,16 @@ git-weekly report --api-base https://api.deepseek.com/v1
 
 模板文件 `templates/weekly-report.md`，使用 `{{PLACEHOLDER}}` 占位符：
 
-| 占位符 | 替换为 |
-|--------|--------|
-| `{{WEEK}}` | ISO 周号，如 `W25 (2026)` |
-| `{{DATE_RANGE}}` | 本周日期范围 |
-| `{{COMMITS}}` | 按项目分组的提交列表 |
-| `{{COMMIT_COUNT}}` | 提交总数 |
-| `{{REPO_COUNT}}` | 涉及项目数 |
-| `{{GENERATED_AT}}` | 生成时间 |
+
+| 占位符                | 替换为                   |
+| ------------------ | --------------------- |
+| `{{WEEK}}`         | ISO 周号，如 `W25 (2026)` |
+| `{{DATE_RANGE}}`   | 本周日期范围                |
+| `{{COMMITS}}`      | 按项目分组的提交列表            |
+| `{{COMMIT_COUNT}}` | 提交总数                  |
+| `{{REPO_COUNT}}`   | 涉及项目数                 |
+| `{{GENERATED_AT}}` | 生成时间                  |
+
 
 ```bash
 git-weekly report --template my-custom-template.md
@@ -192,3 +203,4 @@ git-weekly setup uninstall --yes  # 非交互，CI 中直接全清
 - **macOS** — 定时任务依赖 launchd
 - **jq**（可选）— hook 中 JSON 构造，缺失自动回退 Python
 - **OpenAI 兼容 API** — 周报生成
+
