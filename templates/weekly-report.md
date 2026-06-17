@@ -1,48 +1,48 @@
-# 周工作报告 — {{WEEK}}（{{DATE_RANGE}}）
+# Weekly Work Report — {{WEEK}} ({{DATE_RANGE}})
 
-## 概览
+## Overview
 
 <!--
-本周整体进展简述。完成了哪些重要里程碑？
-本周工作呈现了哪些主题？
+Brief summary of overall progress. What key milestones were achieved?
+What themes emerged in this week's work?
 -->
 
-## 各项目工作
+## Work by Project
 
 {{COMMITS}}
 
 <!--
-针对上述每个项目，AI 将展开描述：
-- 完成了什么工作
-- 关键代码变更及其目的
-- 重要的设计决策
+For each project above, the AI will expand on:
+- What work was completed
+- Key code changes and their purpose
+- Important design decisions
 -->
 
-## 重点亮点
+## Highlights
 
 <!--
-- 重要功能完成或上线
-- 做出的关键决策
-- 跨团队协作
-- 经验或发现
+- Significant features completed or shipped
+- Key decisions made
+- Cross-team collaboration
+- Learnings or discoveries
 -->
 
-## 挑战与阻塞
+## Challenges & Blockers
 
 <!--
-- 遇到的障碍
-- 待定决策
-- 需要的资源
+- Obstacles encountered
+- Pending decisions
+- Resources needed
 -->
 
-## 下周计划
+## Next Week Plan
 
 <!--
-- 下周计划的工作
-- 优先级和目标
+- Planned work for next week
+- Priorities and goals
 -->
 
 ---
 
-> 📊 基于 {{COMMIT_COUNT}} 条提交（{{REPO_COUNT}} 个项目）生成
-> 🤖 AI 生成周报 — {{GENERATED_AT}}
+> 📊 Generated from {{COMMIT_COUNT}} commits across {{REPO_COUNT}} repos
+> 🤖 AI-generated weekly report — {{GENERATED_AT}}

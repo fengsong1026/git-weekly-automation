@@ -1,131 +1,137 @@
 # git-weekly-automation
 
-> 一条命令安装，自动记录每一次 git commit，周五下班前 AI 帮你写好中文周报。
+> One command to install. Every git commit is logged automatically. AI writes your weekly report before you leave on Friday.
 
-## 3 分钟上手
+*English Documentation · [中文文档](README.zh.md)*
+
+## Quick Start
 
 ```bash
-# 1. 安装
+# 1. Install
 npm install -g git-weekly-automation
 
-# 2. 初始化
+# 2. Initialize
 git-weekly setup
 
-# 3. 配置 API Key
+# 3. Set your API key
 export OPENAI_API_KEY="sk-your-key-here"
-# 如果用 DeepSeek 等第三方 API，还需指定地址：
+# For third-party APIs like DeepSeek, also set the base URL:
 # export OPENAI_BASE_URL="https://api.deepseek.com/v1"
 
-# 4. 立即试试
+# 4. Generate your first report
 git-weekly report
 ```
 
-执行 `git-weekly setup` 之后，本机所有 Git 仓库的每次 `git commit` 都会自动记录。
+After `git-weekly setup`, every `git commit` on this machine is automatically logged.
 
 ---
 
-## 常用命令
+## Commands
 
+| Command | Description |
+|------------------------------------|-------------|
+| `git-weekly setup` | Install global git hook |
+| `git-weekly report` | Generate weekly report |
+| `git-weekly collect --scan ~/work` | Bulk-collect commit history from repos |
+| `git-weekly schedule add` | Add a scheduled task (interactive) |
+| `git-weekly schedule list` | List all scheduled tasks |
+| `git-weekly cleanup` | Clean up orphaned installations |
 
-| 命令                                 | 说明            |
-| ---------------------------------- | ------------- |
-| `git-weekly setup`                 | 安装全局 git hook |
-| `git-weekly report`                | 生成本周周报        |
-| `git-weekly collect --scan ~/work` | 从现有仓库批量采集历史提交 |
-| `git-weekly schedule add`          | 添加定时任务（交互式引导） |
-| `git-weekly schedule list`         | 查看所有定时任务      |
-| `git-weekly cleanup`               | 清理残留的孤儿安装     |
-
-
-## 命令详解
+## Command Reference
 
 ### git-weekly setup
 
-安装全局 git hook，之后本机每次 `git commit` 自动记录到 `data/commits/`。
+Installs a global git hook that records every `git commit` to `data/commits/`.
 
 ```bash
-git-weekly setup            # 安装
-git-weekly setup uninstall  # 卸载（自动清理所有产物）
-git-weekly setup uninstall --yes  # 非交互卸载（CI/脚本用）
+git-weekly setup                 # Install
+git-weekly setup uninstall       # Uninstall (cleans up everything)
+git-weekly setup uninstall --yes # Non-interactive (for CI/scripts)
 ```
 
 ### git-weekly report
 
-读取本周提交记录，调用 AI 生成中文周报。
+Reads commit logs and generates a weekly report via AI.
 
 ```bash
-# 前置：配置 API Key
-export OPENAI_API_KEY="sk-..."
+# Generate a report for the current week
+git-weekly report
 
-# 基础用法
-git-weekly report                        # 本周、当前用户
-git-weekly report --week 25              # 指定 ISO 周号
-git-weekly report --all-authors          # 所有作者
-git-weekly report --dry-run              # 只看 prompt，不调 API
-git-weekly report -o my-report.md        # 指定输出路径
-git-weekly report --api-base https://api.deepseek.com/v1  # 自定义 API
+# Report in Chinese
+git-weekly report --lang zh
+
+# Specify an ISO week number
+git-weekly report --week 25
+
+# Include all authors
+git-weekly report --all-authors
+
+# Preview the AI prompt without making an API call
+git-weekly report --dry-run
+
+# Custom output path or API endpoint
+git-weekly report -o my-report.md
+git-weekly report --api-base https://api.deepseek.com/v1 --model deepseek-chat
 ```
 
 ### git-weekly collect
 
-扫描目录下所有 Git 仓库（含 submodule），批量拉取提交记录。用于导入历史记录或从多台机器同步。
+Scans directories for git repos (including submodules) and bulk-imports commit history. Useful for backfilling or syncing from multiple machines.
 
 ```bash
-git-weekly collect --scan ~/work                    # 扫描单个目录
-git-weekly collect --scan ~/work --scan ~/projects  # 扫描多个
-git-weekly collect --scan ~/work --since 2026-01-01 # 指定起始日期
-git-weekly collect --scan ~/work --dry-run           # 预览不写入
+git-weekly collect --scan ~/work                    # Single directory
+git-weekly collect --scan ~/work --scan ~/projects  # Multiple directories
+git-weekly collect --scan ~/work --since 2026-01-01 # With date filter
+git-weekly collect --scan ~/work --dry-run           # Preview only
 ```
 
 ### git-weekly schedule
 
-管理 macOS launchd 定时任务。
+Manages macOS launchd scheduled tasks.
 
 ```bash
-git-weekly schedule add     # 交互式添加（推荐）
-git-weekly schedule list    # 查看所有任务
-git-weekly schedule show -n weekly-report  # 任务详情 + 最近日志
-git-weekly schedule remove -n weekly-report  # 删除任务
-git-weekly schedule clear   # 清空全部
+git-weekly schedule add                           # Interactive add (recommended)
+git-weekly schedule list                          # List all tasks
+git-weekly schedule show -n weekly-report         # Details + recent logs
+git-weekly schedule remove -n weekly-report       # Remove a task
+git-weekly schedule clear                         # Remove all tasks
 ```
 
-**Schedule 表达式：**
+**Schedule expressions:**
 
-
-| 表达式                 | 含义           |
-| ------------------- | ------------ |
-| `Fri 18:00`         | 每周五下午 6 点    |
-| `Mon 09:00`         | 每周一早上 9 点    |
-| `Mon,Wed,Fri 14:00` | 周一、三、五下午 2 点 |
-| `weekday 08:00`     | 周一至周五早上 8 点  |
-| `daily 08:00`       | 每天早上 8 点     |
-
+| Expression | Meaning |
+|------------|---------|
+| `Fri 18:00` | Every Friday at 6 PM |
+| `Mon 09:00` | Every Monday at 9 AM |
+| `Mon,Wed,Fri 14:00` | Mon, Wed, Fri at 2 PM |
+| `weekday 08:00` | Mon–Fri at 8 AM |
+| `daily 08:00` | Every day at 8 AM |
 
 ### git-weekly cleanup
 
-如果项目目录被意外删除（没先跑 uninstall），注册表中会留下孤儿条目。此命令扫描并清理：
+If the project directory is deleted without running `uninstall`, orphaned entries remain in the registry. This command cleans them up:
 
 ```bash
 git-weekly cleanup
 ```
 
-自动执行：卸载残留 launchd 任务 → 删除 plist 文件 → 恢复 git hooksPath → 移除注册表条目。
+Automatically: unloads residual launchd tasks → deletes plist files → restores git hooksPath → removes registry entries.
 
 ---
 
-## 数据文件位置
+## Data Files
 
 ```
 data/
 ├── commits/
-│   ├── 2026-W25.jsonl      # 每周提交记录（JSONL）
+│   ├── 2026-W25.jsonl      # Weekly commit logs (JSONL)
 │   └── ...
-└── logs/                   # 定时任务运行日志
+└── logs/                   # Scheduled task run logs
 
-reports/                    # 生成的周报（.md）
+reports/                    # Generated reports (.md)
 ```
 
-提交记录格式（一行一条 JSON）：
+Commit record format (one JSON object per line):
 
 ```json
 {"hash":"abc123...","author":"Zhang San","email":"zhangsan@example.com","timestamp":"2026-06-15T14:30:00+08:00","message":"feat: add auth module","repo":"my-project","repo_path":"/path/to/repo","branch":"main","hostname":"MacBook.local"}
@@ -133,46 +139,44 @@ reports/                    # 生成的周报（.md）
 
 ---
 
-## API 配置
+## API Configuration
 
-四种方式，优先级从高到低：
+Four methods, in priority order:
 
 ```bash
-# 1. 命令行参数（最高优先级）
+# 1. CLI flags (highest priority)
 git-weekly report --api-base https://api.deepseek.com/v1 --model deepseek-chat
 
-# 2. 环境变量
+# 2. Environment variables
 export OPENAI_API_KEY="sk-..."
 export OPENAI_BASE_URL="https://api.deepseek.com/v1"
 
-# 3. 项目根目录 config.json（复制 config.example.json 后修改）
+# 3. config.json (copy the example and edit)
 cp config.example.json config.json
-# 编辑 config.json：
-#   "api_key":  API 密钥
-#   "api_base": API 地址（可选，默认 api.openai.com/v1）
-#   "model":    模型名（可选，默认 gpt-4o-mini）
+# Edit config.json:
+#   "api_key":  API key
+#   "api_base": API base URL (optional, defaults to api.openai.com/v1)
+#   "model":    Model name (optional, defaults to gpt-4o-mini)
 
-# 4. 什么都不配 → 走 dry-run 模式预览 prompt
+# 4. Nothing configured → dry-run mode (previews the prompt)
 ```
 
-支持任何 OpenAI 兼容 API：OpenAI、DeepSeek、vLLM、Ollama、LiteLLM 等。
+Works with any OpenAI-compatible API: OpenAI, DeepSeek, vLLM, Ollama, LiteLLM, etc.
 
 ---
 
-## 自定义模板
+## Custom Templates
 
-模板文件 `templates/weekly-report.md`，使用 `{{PLACEHOLDER}}` 占位符：
+The template file `templates/weekly-report.md` uses `{{PLACEHOLDER}}` syntax:
 
-
-| 占位符                | 替换为                   |
-| ------------------ | --------------------- |
-| `{{WEEK}}`         | ISO 周号，如 `W25 (2026)` |
-| `{{DATE_RANGE}}`   | 本周日期范围                |
-| `{{COMMITS}}`      | 按项目分组的提交列表            |
-| `{{COMMIT_COUNT}}` | 提交总数                  |
-| `{{REPO_COUNT}}`   | 涉及项目数                 |
-| `{{GENERATED_AT}}` | 生成时间                  |
-
+| Placeholder | Replaced with |
+|-------------|---------------|
+| `{{WEEK}}` | ISO week number, e.g. `W25 (2026)` |
+| `{{DATE_RANGE}}` | Date range for the week |
+| `{{COMMITS}}` | Commits grouped by project |
+| `{{COMMIT_COUNT}}` | Total commit count |
+| `{{REPO_COUNT}}` | Number of repos |
+| `{{GENERATED_AT}}` | Generation timestamp |
 
 ```bash
 git-weekly report --template my-custom-template.md
@@ -180,27 +184,26 @@ git-weekly report --template my-custom-template.md
 
 ---
 
-## 卸载
+## Uninstall
 
 ```bash
-# npm 用户
+# npm users
 npm uninstall -g git-weekly-automation
 
-# 或手动
-git-weekly setup uninstall     # 交互式，会确认是否删除数据
-git-weekly setup uninstall --yes  # 非交互，CI 中直接全清
+# Manual install
+git-weekly setup uninstall        # Interactive — confirms before removing data
+git-weekly setup uninstall --yes  # Non-interactive for CI
 ```
 
-卸载会移除：git hook、所有定时任务、注册表条目。数据和报告按提示确认。
+Removes: git hook, all scheduled tasks, and registry entries. Data and reports are removed upon confirmation.
 
 ---
 
-## 依赖
+## Dependencies
 
-- **Git** — 提交记录采集
-- **Python 3.8+** — 脚本运行（仅标准库，无需 pip）
-- **Node.js / npm** — 安装工具（手动克隆可跳过）
-- **macOS** — 定时任务依赖 launchd
-- **jq**（可选）— hook 中 JSON 构造，缺失自动回退 Python
-- **OpenAI 兼容 API** — 周报生成
-
+- **Git** — commit collection
+- **Python 3.8+** — scripts (stdlib only, no pip dependencies)
+- **Node.js / npm** — install tool (skip if cloning manually)
+- **macOS** — scheduling uses launchd
+- **jq** (optional) — JSON construction in the hook; falls back to Python automatically
+- **OpenAI-compatible API** — report generation

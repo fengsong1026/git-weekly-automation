@@ -90,9 +90,9 @@ class TestSystemPrompt(TestCase):
         self.assertIn("English", prompt)
         self.assertIn("weekly report", prompt.lower())
 
-    def test_default_is_chinese(self):
+    def test_default_is_english(self):
         prompt = build_system_prompt()
-        self.assertIn("简体中文", prompt)
+        self.assertIn("English", prompt)
 
 
 class TestTemplates(TestCase):
@@ -114,9 +114,9 @@ class TestTemplates(TestCase):
         self.assertIn("周工作报告", zh)
         self.assertIn("Weekly Work Report", en)
 
-    def test_get_default_template_unknown_lang_falls_back_zh(self):
+    def test_get_default_template_unknown_lang_falls_back_en(self):
         result = get_default_template("fr")
-        self.assertIn("周工作报告", result)
+        self.assertIn("Weekly Work Report", result)
 
 
 class TestModelConfig(TestCase):

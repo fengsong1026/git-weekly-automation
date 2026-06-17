@@ -236,12 +236,12 @@ def format_commit_list(commits: list[dict]) -> str:
 # Template processing
 # ---------------------------------------------------------------------------
 
-def get_default_template(lang: str = "zh") -> str:
+def get_default_template(lang: str = "en") -> str:
     """Return the built-in template for the given language."""
-    return DEFAULT_TEMPLATE_CONTENT_EN if lang == "en" else DEFAULT_TEMPLATE_CONTENT_ZH
+    return DEFAULT_TEMPLATE_CONTENT_EN if lang != "zh" else DEFAULT_TEMPLATE_CONTENT_ZH
 
 
-def load_template(template_path: Path, lang: str = "zh") -> str:
+def load_template(template_path: Path, lang: str = "en") -> str:
     """Load the report template from a file, falling back to language-appropriate default."""
     if not template_path.exists():
         print(f"[!] Template not found: {template_path}", file=sys.stderr)
@@ -290,7 +290,7 @@ DEFAULT_TEMPLATE_CONTENT_EN = """\
 > 📊 Generated from {{COMMIT_COUNT}} commits across {{REPO_COUNT}} repos
 """
 
-DEFAULT_TEMPLATE_CONTENT = DEFAULT_TEMPLATE_CONTENT_ZH  # default for compatibility
+DEFAULT_TEMPLATE_CONTENT = DEFAULT_TEMPLATE_CONTENT_EN  # default for compatibility
 
 
 def fill_template(template: str, variables: dict[str, str]) -> str:
@@ -305,7 +305,7 @@ def fill_template(template: str, variables: dict[str, str]) -> str:
 # OpenAI-compatible API call
 # ---------------------------------------------------------------------------
 
-def build_system_prompt(lang: str = "zh") -> str:
+def build_system_prompt(lang: str = "en") -> str:
     """Build the system prompt for the AI model in the requested language."""
     if lang == "en":
         return """You are a professional weekly report writer. Your task is to generate \
@@ -514,9 +514,9 @@ Examples:
     parser.add_argument(
         "--lang",
         type=str,
-        default="zh",
+        default="en",
         choices=["zh", "en"],
-        help="Report language: zh (Simplified Chinese, default) or en (English)",
+        help="Report language: en (English, default) or zh (Simplified Chinese)",
     )
 
     args = parser.parse_args()
