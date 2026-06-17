@@ -352,6 +352,7 @@ def append_commits_to_files(commits: list[dict]) -> dict[str, int]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
+        prog="git-weekly collect",
         description="Collect git commits by scanning directories for repositories.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -371,13 +372,13 @@ Examples:
         help="Directory to scan for git repos (can be specified multiple times)",
     )
     parser.add_argument(
-        "--since",
+        "--since", "-S",
         type=str,
         default=None,
         help="Only collect commits since this date (YYYY-MM-DD). Default: this week's Monday.",
     )
     parser.add_argument(
-        "--until",
+        "--until", "-U",
         type=str,
         default=None,
         help="Only collect commits until this date (YYYY-MM-DD)",
@@ -400,7 +401,7 @@ Examples:
         help="Only collect commits by this author email (overrides default auto-detect)",
     )
     parser.add_argument(
-        "--all-authors",
+        "--all-authors", "-A",
         action="store_true",
         help="Collect commits from all authors (default: current git user only)",
     )

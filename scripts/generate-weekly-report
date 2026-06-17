@@ -436,6 +436,7 @@ def call_openai_compatible_api(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
+        prog="git-weekly report",
         description="Generate an AI-powered weekly work report from git commit logs.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -455,7 +456,7 @@ Examples:
         help="ISO week number (default: current week, Mon–today)",
     )
     parser.add_argument(
-        "--year",
+        "--year", "-y",
         type=int,
         default=None,
         help="Year for the week (default: current year)",
@@ -473,7 +474,7 @@ Examples:
         help="Output file path (default: reports/weekly-WXX-YYYY.md)",
     )
     parser.add_argument(
-        "--api-base",
+        "--api-base", "-b",
         type=str,
         default=None,
         help=f"OpenAI-compatible API base URL (default: $OPENAI_BASE_URL or {OPENAI_DEFAULT_BASE_URL})",
@@ -507,12 +508,12 @@ Examples:
         help="Only include commits by this author email (overrides default auto-detect)",
     )
     parser.add_argument(
-        "--all-authors",
+        "--all-authors", "-A",
         action="store_true",
         help="Include commits from all authors (disable default current-user filter)",
     )
     parser.add_argument(
-        "--lang",
+        "--lang", "-l",
         type=str,
         default=None,
         choices=["zh", "en"],

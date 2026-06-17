@@ -623,6 +623,7 @@ def cmd_show(args) -> None:
 def main() -> None:
     _check_platform()
     parser = argparse.ArgumentParser(
+        prog="git-weekly schedule",
         description="Manage scheduled tasks for git-weekly-automation using macOS launchd.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
