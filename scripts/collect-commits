@@ -192,17 +192,25 @@ def collect_commits_from_repo(
     """
     Collect commit metadata from a single git repository.
 
-    Returns a list of commit dicts (same format as the post-commit hook)
-    for commits that aren't already in existing_hashes.
-    If `author` is provided, only commits by that author are collected.
+    Uses a single batch git log call with null-delimited fields to avoid
+    per-commit subprocess overhead. Returns commit dicts for commits
+    not already in existing_hashes.
     """
     if existing_hashes is None:
         existing_hashes = set()
 
     commits: list[dict] = []
+    repo_name = repo_path.name
+    repo_resolved = str(repo_path.resolve())
+    hostname = os.uname().nodename
 
-    # Build git log command to get commit hashes
-    cmd = ["git", "-C", str(repo_path), "log", "--format=%H"]
+    # Single batch call: all fields, null-delimited records, null-delimited fields
+    # Format: %H (hash) \x00 %an (author) \x00 %ae (email) \x00 %aI (timestamp) \x00 %B (message) \x00 \x00 (record separator)
+    cmd = [
+        "git", "-C", str(repo_path), "log",
+        "--format=%H%x00%an%x00%ae%x00%aI%x00%B%x00",
+        "-z",  # null-delimited records
+    ]
     if since:
         cmd.append(f"--since={since}")
     if until:
@@ -211,82 +219,83 @@ def collect_commits_from_repo(
         cmd.append(f"--author={author}")
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(cmd, capture_output=True, text=False, timeout=120)
         if result.returncode != 0:
-            print(f"  [!] git log failed in {repo_path.name}: {result.stderr.strip()}", file=sys.stderr)
+            print(f"  [!] git log failed in {repo_name}: {result.stderr.decode('utf-8', errors='replace').strip()}", file=sys.stderr)
             return commits
     except subprocess.TimeoutExpired:
-        print(f"  [!] git log timed out in {repo_path.name}", file=sys.stderr)
+        print(f"  [!] git log timed out in {repo_name}", file=sys.stderr)
         return commits
     except OSError as e:
-        print(f"  [!] Error running git in {repo_path.name}: {e}", file=sys.stderr)
+        print(f"  [!] Error running git in {repo_name}: {e}", file=sys.stderr)
         return commits
 
-    hashes = [h.strip() for h in result.stdout.strip().split("\n") if h.strip()]
-
-    if not hashes:
+    # Parse null-delimited output
+    raw = result.stdout
+    if not raw:
         return commits
 
-    # Filter to new hashes only
-    new_hashes = [h for h in hashes if h not in existing_hashes]
-    if not new_hashes:
-        return commits
+    # Split on double-null: each record ends with \x00\x00 (field null + record separator null)
+    records = raw.split(b"\x00\x00")
+    total = 0
+    new_count = 0
 
-    print(f"  [*] {len(new_hashes)} new commits (of {len(hashes)} total)")
+    # Get branch once for all commits (same repo)
+    branch = "unknown"
+    try:
+        br = subprocess.run(
+            ["git", "-C", str(repo_path), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if br.returncode == 0:
+            branch = br.stdout.strip()
+    except (subprocess.TimeoutExpired, OSError):
+        pass
 
-    # Fetch details for each new commit
-    for i, h in enumerate(new_hashes):
-        try:
-            detail = subprocess.run(
-                [
-                    "git", "-C", str(repo_path), "log", "-1",
-                    "--format=%H%x00%an%x00%ae%x00%aI%x00%B",
-                    h,
-                ],
-                capture_output=True, text=True, timeout=10,
-            )
-            if detail.returncode != 0:
-                continue
+    for record in records:
+        if not record.strip(b"\x00"):
+            continue
+        total += 1
 
-            # Parse null-delimited fields
-            parts = detail.stdout.split("\0")
-            if len(parts) < 5:
-                continue
-
-            commit_hash = parts[0].strip()
-            author = parts[1].strip()
-            email = parts[2].strip()
-            timestamp = parts[3].strip()
-            message = parts[4].strip()  # Full message (may include newlines)
-
-            # Get branch info (current branch at the time of collection,
-            # since git doesn't record branch per-commit historically)
-            branch_result = subprocess.run(
-                ["git", "-C", str(repo_path), "rev-parse", "--abbrev-ref", "HEAD"],
-                capture_output=True, text=True, timeout=5,
-            )
-            branch = branch_result.stdout.strip() if branch_result.returncode == 0 else "unknown"
-
-            entry = {
-                "hash": commit_hash,
-                "author": author,
-                "email": email,
-                "timestamp": timestamp,
-                "message": message,
-                "repo": repo_path.name,
-                "repo_path": str(repo_path.resolve()),
-                "branch": branch,
-                "hostname": os.uname().nodename,
-            }
-            commits.append(entry)
-            existing_hashes.add(commit_hash)
-
-        except (subprocess.TimeoutExpired, OSError):
+        # Each record: hash\x00author\x00email\x00timestamp\x00message
+        # Use split with maxsplit to handle messages containing \x00 (rare but possible)
+        parts = record.split(b"\x00", 4)
+        if len(parts) < 5:
             continue
 
-        # Progress indicator for large batches
-        if (i + 1) % 50 == 0:
-            print(f"    ... {i + 1}/{len(new_hashes)}")
+        try:
+            commit_hash = parts[0].decode("utf-8", errors="replace")
+        except Exception:
+            continue
+
+        if commit_hash in existing_hashes:
+            continue
+
+        new_count += 1
+        try:
+            author_name = parts[1].decode("utf-8", errors="replace")
+            email = parts[2].decode("utf-8", errors="replace")
+            timestamp = parts[3].decode("utf-8", errors="replace")
+            message = parts[4].decode("utf-8", errors="replace").strip()
+        except Exception:
+            continue
+
+        entry = {
+            "hash": commit_hash,
+            "author": author_name,
+            "email": email,
+            "timestamp": timestamp,
+            "message": message,
+            "repo": repo_name,
+            "repo_path": repo_resolved,
+            "branch": branch,
+            "hostname": hostname,
+        }
+        commits.append(entry)
+        existing_hashes.add(commit_hash)
+
+    if new_count > 0:
+        print(f"  [*] {new_count} new commits (of {total} total)")
 
     return commits
 
@@ -439,6 +448,9 @@ Examples:
     all_new_commits: list[dict] = []
     repo_stats: list[tuple[str, int, int]] = []  # (name, total, new)
 
+    # Load all existing hashes once (not per-repo)
+    existing_hashes = load_all_existing_hashes() if not args.dry_run else set()
+
     for repo_path in all_repos:
         print(f"\n  ▸ {repo_path.name} ({repo_path})")
 
@@ -461,10 +473,7 @@ Examples:
             repo_stats.append((repo_path.name, 0, 0))
             continue
 
-        # Load existing hashes (to deduplicate)
-        existing_hashes = load_all_existing_hashes()
-
-        # Collect
+        # Collect (using globally loaded hash set for dedup)
         new_commits = collect_commits_from_repo(
             repo_path,
             since=effective_since,

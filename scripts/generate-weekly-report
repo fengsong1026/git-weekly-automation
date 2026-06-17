@@ -47,7 +47,7 @@ from typing import Optional, Union
 
 # Shared utilities from sibling scripts
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import load_config, get_git_user_email, validate_iso_week
+from common import load_config, get_git_user_email, purge_old_data, validate_iso_week
 
 
 # ---------------------------------------------------------------------------
@@ -236,16 +236,21 @@ def format_commit_list(commits: list[dict]) -> str:
 # Template processing
 # ---------------------------------------------------------------------------
 
-def load_template(template_path: Path) -> str:
-    """Load the report template from a file."""
+def get_default_template(lang: str = "zh") -> str:
+    """Return the built-in template for the given language."""
+    return DEFAULT_TEMPLATE_CONTENT_EN if lang == "en" else DEFAULT_TEMPLATE_CONTENT_ZH
+
+
+def load_template(template_path: Path, lang: str = "zh") -> str:
+    """Load the report template from a file, falling back to language-appropriate default."""
     if not template_path.exists():
         print(f"[!] Template not found: {template_path}", file=sys.stderr)
-        print("[!] Using built-in minimal template.", file=sys.stderr)
-        return DEFAULT_TEMPLATE_CONTENT
+        print("[!] Using built-in default template.", file=sys.stderr)
+        return get_default_template(lang)
     return template_path.read_text(encoding="utf-8")
 
 
-DEFAULT_TEMPLATE_CONTENT = """\
+DEFAULT_TEMPLATE_CONTENT_ZH = """\
 # 周工作报告 — {{WEEK}}（{{DATE_RANGE}}）
 
 ## 概览
@@ -265,6 +270,28 @@ DEFAULT_TEMPLATE_CONTENT = """\
 > 📊 基于 {{COMMIT_COUNT}} 条提交（{{REPO_COUNT}} 个项目）生成
 """
 
+DEFAULT_TEMPLATE_CONTENT_EN = """\
+# Weekly Work Report — {{WEEK}} ({{DATE_RANGE}})
+
+## Overview
+
+## Work by Project
+
+{{COMMITS}}
+
+## Highlights
+
+## Challenges & Blockers
+
+## Next Week Plan
+
+---
+
+> 📊 Generated from {{COMMIT_COUNT}} commits across {{REPO_COUNT}} repos
+"""
+
+DEFAULT_TEMPLATE_CONTENT = DEFAULT_TEMPLATE_CONTENT_ZH  # default for compatibility
+
 
 def fill_template(template: str, variables: dict[str, str]) -> str:
     """Replace {{PLACEHOLDERS}} in the template with values."""
@@ -278,8 +305,24 @@ def fill_template(template: str, variables: dict[str, str]) -> str:
 # OpenAI-compatible API call
 # ---------------------------------------------------------------------------
 
-def build_system_prompt() -> str:
-    """Build the system prompt for the AI model."""
+def build_system_prompt(lang: str = "zh") -> str:
+    """Build the system prompt for the AI model in the requested language."""
+    if lang == "en":
+        return """You are a professional weekly report writer. Your task is to generate \
+a concise, well-structured weekly work report based on git commit history.
+
+Requirements:
+- Output in English, professional and natural — like a tech lead summarizing the team's week to management.
+- Group by project. For each project, describe "what was done" and "why" at a high level — do not just list commits.
+- Identify themes and patterns across commits (e.g. "this week focused on auth module refactoring").
+- Highlight important changes, new features, bug fixes, and key refactors.
+- Note any unfinished work or in-progress branches to reflect ongoing efforts.
+- The report should be concise but substantial — readable in 3-5 minutes.
+- Use bullet points in each section for readability.
+- Fill ALL template sections — do not leave any empty. If a section truly has no content, write "Nothing relevant this week."
+- Preserve the template's markdown structure exactly.
+- Output ONLY the final report markdown — no preamble or commentary."""
+
     return """你是一名专业的技术周报撰写人。你的任务是根据 git 提交历史，\
 生成一份简洁、结构清晰的周工作报告。
 
@@ -438,8 +481,8 @@ Examples:
     parser.add_argument(
         "-m", "--model",
         type=str,
-        default=DEFAULT_MODEL,
-        help=f"Model name to use (default: {DEFAULT_MODEL})",
+        default=None,
+        help=f"Model name to use (default: {DEFAULT_MODEL}, from config or built-in)",
     )
     parser.add_argument(
         "--dry-run",
@@ -467,6 +510,13 @@ Examples:
         "--all-authors",
         action="store_true",
         help="Include commits from all authors (disable default current-user filter)",
+    )
+    parser.add_argument(
+        "--lang",
+        type=str,
+        default="zh",
+        choices=["zh", "en"],
+        help="Report language: zh (Simplified Chinese, default) or en (English)",
     )
 
     args = parser.parse_args()
@@ -526,7 +576,7 @@ Examples:
     repo_count = len(group_commits_by_repo(commits))
 
     # --- Step 4: Load & fill template ---
-    template = load_template(args.template)
+    template = load_template(args.template, args.lang)
     prompt_variables = {
         "WEEK": week_label,
         "DATE_RANGE": date_range,
@@ -538,8 +588,21 @@ Examples:
     filled_template = fill_template(template, prompt_variables)
 
     # --- Step 5: Build prompts ---
-    system_prompt = build_system_prompt()
-    user_message = f"""请根据以下模板和提交数据生成一份周工作报告。\
+    system_prompt = build_system_prompt(args.lang)
+
+    if args.lang == "en":
+        user_message = f"""Generate a weekly work report based on the template and commit data below.
+Fill in all sections of the template based on the commit content.
+
+## Template
+
+{filled_template}
+
+Replace the commit list under "Work by Project" with your narrative summary
+(grouped by project, describing what work was completed). Preserve all section
+headings and overall structure. Output the complete report in markdown format, in English."""
+    else:
+        user_message = f"""请根据以下模板和提交数据生成一份周工作报告。\
 根据提交内容填写模板的所有章节。
 
 ## 模板
@@ -598,6 +661,11 @@ Examples:
 
     print(f"\n[✓] Weekly report saved to: {output_path}")
     print(f"[✓] Report length: {len(report)} chars / ~{len(report.splitlines())} lines")
+
+    # --- Step 9: Run data retention cleanup (if configured) ---
+    cleanup_cfg = config.get("cleanup", {})
+    if isinstance(cleanup_cfg, dict) and cleanup_cfg.get("on_report", False):
+        purge_old_data(config)
 
 
 if __name__ == "__main__":

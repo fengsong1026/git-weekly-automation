@@ -18,6 +18,7 @@ This enables clean uninstallation even if the project directory is deleted
 import fcntl
 import json
 import os
+import subprocess
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -271,8 +272,8 @@ def unregister_task(project_path: str, task_name: str) -> Optional[dict]:
         # If no tasks remain and no hooks set, remove the entire installation entry
         if not entry["scheduled_tasks"] and not entry.get("hooks_path_set"):
             registry["installations"].pop(project_path, None)
-        else:
-            save_registry(registry)
+
+        save_registry(registry)
         return entry
 
 
@@ -293,8 +294,8 @@ def clear_tasks(project_path: str) -> Optional[dict]:
         # If hooks were never set either, remove the entire entry
         if not entry.get("hooks_path_set"):
             registry["installations"].pop(project_path, None)
-        else:
-            save_registry(registry)
+
+        save_registry(registry)
         return entry
 
 
@@ -328,16 +329,13 @@ def cleanup_orphans() -> list:
                     pass
             label = task_info.get("label", "")
             if label:
-                import os as _os
-                import subprocess
                 subprocess.run(
-                    ["launchctl", "bootout", f"gui/{_os.getuid()}/{label}"],
+                    ["launchctl", "bootout", f"gui/{os.getuid()}/{label}"],
                     capture_output=True,
                 )
 
         # Restore hooksPath if needed
         if entry.get("hooks_path_set") and entry.get("original_hooks_path") is not None:
-            import subprocess
             current = subprocess.run(
                 ["git", "config", "--global", "core.hooksPath"],
                 capture_output=True, text=True,
