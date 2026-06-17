@@ -60,7 +60,8 @@ git-weekly setup uninstall --yes  # 非交互卸载（CI/脚本用）
 export OPENAI_API_KEY="sk-..."
 
 # 基础用法
-git-weekly report                        # 本周、当前用户
+git-weekly report                        # 本周、当前用户（默认英文，需中文见下）
+git-weekly report --lang zh              # 中文报告（或在 config.json 中设 "lang": "zh"）
 git-weekly report --week 25              # 指定 ISO 周号
 git-weekly report --all-authors          # 所有作者
 git-weekly report --dry-run              # 只看 prompt，不调 API
@@ -125,7 +126,11 @@ data/
 └── logs/                   # 定时任务运行日志
 
 reports/                    # 生成的周报（.md）
+~/.git-weekly-automation/
+└── registry.json           # 中央注册表（跟踪安装信息）
 ```
+
+过期数据会根据[配置](#配置)自动清理——默认：提交日志 > 52 周、报告 > 26 周、运行日志 > 90 天，在每次生成报告时自动移除。
 
 提交记录格式（一行一条 JSON）：
 
@@ -135,27 +140,62 @@ reports/                    # 生成的周报（.md）
 
 ---
 
-## API 配置
+## 配置
 
-四种方式，优先级从高到低：
+所有选项的优先级：**命令行参数 > 环境变量 > config.json > 内置默认值**。
+
+### config.json
+
+复制示例文件后修改：
 
 ```bash
-# 1. 命令行参数（最高优先级）
-git-weekly report --api-base https://api.deepseek.com/v1 --model deepseek-chat
+cp config.example.json config.json
+```
 
-# 2. 环境变量
+完整字段说明：
+
+```json
+{
+  "api_key": "sk-your-api-key-here",
+  "api_base": "https://api.openai.com/v1",
+  "model": "gpt-4o-mini",
+  "lang": "zh",
+  "cleanup": {
+    "commits_weeks": 52,
+    "reports_weeks": 26,
+    "logs_days": 90,
+    "on_report": true
+  }
+}
+```
+
+| 字段 | 默认值 | 说明 |
+|-----|---------|------|
+| `api_key` | — | API 密钥（也可通过 `OPENAI_API_KEY` 环境变量或 `--api-key` 参数设置） |
+| `api_base` | `https://api.openai.com/v1` | API 地址（也可通过 `OPENAI_BASE_URL` 环境变量或 `--api-base` 参数设置） |
+| `model` | `gpt-4o-mini` | 模型名称（也可通过 `--model` 参数设置） |
+| `lang` | `en` | 报告语言：`zh`（简体中文）或 `en`（英文）。也可通过 `--lang` 参数设置 |
+| `cleanup.commits_weeks` | `52` | 超过 N 周的提交日志自动删除，设 `0` 禁用 |
+| `cleanup.reports_weeks` | `26` | 超过 N 周的报告自动删除，设 `0` 禁用 |
+| `cleanup.logs_days` | `90` | 超过 N 天的运行日志自动删除，设 `0` 禁用 |
+| `cleanup.on_report` | `true` | 每次生成报告后自动执行清理 |
+
+### 环境变量
+
+```bash
 export OPENAI_API_KEY="sk-..."
 export OPENAI_BASE_URL="https://api.deepseek.com/v1"
-
-# 3. 项目根目录 config.json（复制 config.example.json 后修改）
-cp config.example.json config.json
-# 编辑 config.json：
-#   "api_key":  API 密钥
-#   "api_base": API 地址（可选，默认 api.openai.com/v1）
-#   "model":    模型名（可选，默认 gpt-4o-mini）
-
-# 4. 什么都不配 → 走 dry-run 模式预览 prompt
 ```
+
+### 命令行参数
+
+```bash
+git-weekly report --api-base https://api.deepseek.com/v1 --model deepseek-chat --lang zh
+```
+
+### 未配置 API Key
+
+没有 API Key 时，report 命令自动进入 **dry-run 模式**——只输出 AI prompt，不调用 API。
 
 支持任何 OpenAI 兼容 API：OpenAI、DeepSeek、vLLM、Ollama、LiteLLM 等。
 

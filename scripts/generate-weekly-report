@@ -554,6 +554,9 @@ Examples:
     # Resolve model: CLI flag > config.json > default
     model = args.model or config.get("model") or DEFAULT_MODEL
 
+    # Resolve language: CLI flag > config.json > default
+    lang = args.lang or config.get("lang") or "en"
+
     # --- Step 1: Determine date range ---
     if args.week is not None:
         validate_iso_week(args.week)
@@ -576,7 +579,7 @@ Examples:
     repo_count = len(group_commits_by_repo(commits))
 
     # --- Step 4: Load & fill template ---
-    template = load_template(args.template, args.lang)
+    template = load_template(args.template, lang)
     prompt_variables = {
         "WEEK": week_label,
         "DATE_RANGE": date_range,
@@ -588,9 +591,9 @@ Examples:
     filled_template = fill_template(template, prompt_variables)
 
     # --- Step 5: Build prompts ---
-    system_prompt = build_system_prompt(args.lang)
+    system_prompt = build_system_prompt(lang)
 
-    if args.lang == "en":
+    if lang == "en":
         user_message = f"""Generate a weekly work report based on the template and commit data below.
 Fill in all sections of the template based on the commit content.
 

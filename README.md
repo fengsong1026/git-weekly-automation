@@ -57,7 +57,7 @@ Reads commit logs and generates a weekly report via AI.
 # Generate a report for the current week
 git-weekly report
 
-# Report in Chinese
+# Report in Chinese (or set "lang": "zh" in config.json)
 git-weekly report --lang zh
 
 # Specify an ISO week number
@@ -129,7 +129,11 @@ data/
 └── logs/                   # Scheduled task run logs
 
 reports/                    # Generated reports (.md)
+~/.git-weekly-automation/
+└── registry.json           # Central registry (tracks installations)
 ```
+
+Old data is automatically purged per the [cleanup configuration](#configuration) — by default: commit logs > 52 weeks, reports > 26 weeks, and logs > 90 days are removed when a report is generated.
 
 Commit record format (one JSON object per line):
 
@@ -139,27 +143,62 @@ Commit record format (one JSON object per line):
 
 ---
 
-## API Configuration
+## Configuration
 
-Four methods, in priority order:
+All settings are resolved with this priority: **CLI flag > environment variable > config.json > built-in default**.
+
+### config.json
+
+Copy the example and edit:
 
 ```bash
-# 1. CLI flags (highest priority)
-git-weekly report --api-base https://api.deepseek.com/v1 --model deepseek-chat
+cp config.example.json config.json
+```
 
-# 2. Environment variables
+Full schema:
+
+```json
+{
+  "api_key": "sk-your-api-key-here",
+  "api_base": "https://api.openai.com/v1",
+  "model": "gpt-4o-mini",
+  "lang": "en",
+  "cleanup": {
+    "commits_weeks": 52,
+    "reports_weeks": 26,
+    "logs_days": 90,
+    "on_report": true
+  }
+}
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `api_key` | — | API key (also settable via `OPENAI_API_KEY` env var or `--api-key` flag) |
+| `api_base` | `https://api.openai.com/v1` | API endpoint (also `OPENAI_BASE_URL` env var or `--api-base` flag) |
+| `model` | `gpt-4o-mini` | Model name (also `--model` flag) |
+| `lang` | `en` | Report language: `en` (English) or `zh` (Simplified Chinese). Also `--lang` flag |
+| `cleanup.commits_weeks` | `52` | Auto-delete commit log files older than N weeks. Set `0` to disable |
+| `cleanup.reports_weeks` | `26` | Auto-delete report files older than N weeks. Set `0` to disable |
+| `cleanup.logs_days` | `90` | Auto-delete log files older than N days. Set `0` to disable |
+| `cleanup.on_report` | `true` | Run cleanup automatically after each report generation |
+
+### Environment variables
+
+```bash
 export OPENAI_API_KEY="sk-..."
 export OPENAI_BASE_URL="https://api.deepseek.com/v1"
-
-# 3. config.json (copy the example and edit)
-cp config.example.json config.json
-# Edit config.json:
-#   "api_key":  API key
-#   "api_base": API base URL (optional, defaults to api.openai.com/v1)
-#   "model":    Model name (optional, defaults to gpt-4o-mini)
-
-# 4. Nothing configured → dry-run mode (previews the prompt)
 ```
+
+### CLI flags
+
+```bash
+git-weekly report --api-base https://api.deepseek.com/v1 --model deepseek-chat --lang zh
+```
+
+### No configuration
+
+With no API key set, the report command falls back to **dry-run mode** — it prints the AI prompt without making an API call.
 
 Works with any OpenAI-compatible API: OpenAI, DeepSeek, vLLM, Ollama, LiteLLM, etc.
 
