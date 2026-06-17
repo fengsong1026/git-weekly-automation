@@ -118,7 +118,7 @@ def main() -> None:
     sch_rm = sch_sub.add_parser("remove", add_help=False, aliases=["rm", "delete"], help="Remove a task")
     sch_rm.add_argument("--name", "-n", required=True, help="Task name")
     sch_cl = sch_sub.add_parser("clear", add_help=False, help="Remove all tasks")
-    sch_cl.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
+    sch_cl.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompt")
     sch_show = sch_sub.add_parser("show", add_help=False, aliases=["info"], help="Show task details")
     sch_show.add_argument("--name", "-n", required=True, help="Task name")
 

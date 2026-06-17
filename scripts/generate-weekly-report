@@ -30,8 +30,8 @@ Usage:
     python3 scripts/generate-weekly-report --api-base https://api.deepseek.com/v1
 
 Environment:
-    OPENAI_API_KEY  — API key (can also be passed via --api-key)
-    OPENAI_BASE_URL — API base URL (can also be passed via --api-base)
+    OPENAI_API_KEY  — API key (or set in config.json)
+    OPENAI_BASE_URL — API base URL (or set in config.json, or --api-base flag)
 """
 
 import argparse
@@ -470,7 +470,7 @@ Examples:
         "-o", "--output",
         type=Path,
         default=None,
-        help="Output file path (default: reports/weekly-YYYY-WXX.md)",
+        help="Output file path (default: reports/weekly-WXX-YYYY.md)",
     )
     parser.add_argument(
         "--api-base",
@@ -514,9 +514,9 @@ Examples:
     parser.add_argument(
         "--lang",
         type=str,
-        default="en",
+        default=None,
         choices=["zh", "en"],
-        help="Report language: en (English, default) or zh (Simplified Chinese)",
+        help="Report language: en (English) or zh (Simplified Chinese). Default: en (from config or built-in)",
     )
 
     args = parser.parse_args()

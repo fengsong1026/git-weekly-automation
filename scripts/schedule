@@ -7,9 +7,10 @@ Supports adding, listing, removing, and showing scheduled tasks.
 
 Commands:
     add      — Schedule a new recurring task
-    list     — List all git-report scheduled tasks
+    list     — List all git-weekly-automation scheduled tasks
     remove   — Remove a scheduled task
     show     — Show details of a scheduled task
+    clear    — Remove all scheduled tasks
 
 Schedule Format:
     Supports human-readable schedule expressions:
@@ -232,7 +233,7 @@ def plist_path(name: str) -> Path:
 
 
 def find_all_plists() -> list[Path]:
-    """Find all git-report plist files in LaunchAgents."""
+    """Find all git-weekly-automation plist files in LaunchAgents."""
     if not LAUNCH_AGENTS_DIR.exists():
         return []
     return sorted(LAUNCH_AGENTS_DIR.glob(f"{LABEL_PREFIX}.*.plist"))
@@ -466,11 +467,11 @@ def cmd_add(args) -> None:
 
 
 def cmd_list(args) -> None:
-    """List all git-report scheduled tasks."""
+    """List all git-weekly-automation scheduled tasks."""
     plists = find_all_plists()
 
     if not plists:
-        print("No git-report scheduled tasks found.")
+        print("No git-weekly-automation scheduled tasks found.")
         print(f"\nTo add one: {sys.argv[0]} add --name <name> --schedule '<schedule>' --command '<cmd>'")
         return
 
@@ -495,7 +496,7 @@ def cmd_list(args) -> None:
 
 
 def cmd_clear(args) -> None:
-    """Clear all git-report scheduled tasks."""
+    """Clear all git-weekly-automation scheduled tasks."""
     plists = find_all_plists()
 
     if not plists:
@@ -622,7 +623,7 @@ def cmd_show(args) -> None:
 def main() -> None:
     _check_platform()
     parser = argparse.ArgumentParser(
-        description="Manage scheduled tasks for git-report using macOS launchd.",
+        description="Manage scheduled tasks for git-weekly-automation using macOS launchd.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
             Schedule examples:

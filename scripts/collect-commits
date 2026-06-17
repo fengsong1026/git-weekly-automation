@@ -27,7 +27,7 @@ Usage:
     # Dry run — list repos and commit counts without saving
     python3 scripts/collect-commits --scan ~/work --dry-run
 
-    # Limit scan depth (default: 3 levels deep)
+    # Limit scan depth (default: 10 levels deep)
     python3 scripts/collect-commits --scan ~/work --max-depth 5
 """
 
@@ -402,7 +402,7 @@ Examples:
     parser.add_argument(
         "--all-authors",
         action="store_true",
-        help="Collect commits from all authors (disable default --my-commits behavior)",
+        help="Collect commits from all authors (default: current git user only)",
     )
 
     args = parser.parse_args()
